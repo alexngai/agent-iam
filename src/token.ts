@@ -224,6 +224,30 @@ export class TokenService {
     return JSON.parse(json) as AgentToken;
   }
 
+  /**
+   * Create a refreshed token with a new expiry
+   * Keeps all other properties the same and re-signs
+   */
+  createRefreshedToken(
+    token: AgentToken,
+    newExpiresAt?: string
+  ): AgentToken {
+    const refreshed: Omit<AgentToken, "signature"> = {
+      agentId: token.agentId,
+      parentId: token.parentId,
+      scopes: token.scopes,
+      constraints: token.constraints,
+      delegatable: token.delegatable,
+      maxDelegationDepth: token.maxDelegationDepth,
+      currentDepth: token.currentDepth,
+      expiresAt: newExpiresAt,
+      maxExpiresAt: token.maxExpiresAt,
+    };
+
+    const signature = sign(refreshed, this.secret);
+    return { ...refreshed, signature };
+  }
+
   /** Merge parent and child constraints */
   private mergeConstraints(
     parentConstraints: Constraints,

@@ -16,6 +16,14 @@ export { ConfigService } from "./config.js";
 
 export { GitHubProvider } from "./providers/github.js";
 
+export {
+  AgentRuntime,
+  withRuntime,
+  withRuntimeFromEnv,
+  AGENT_TOKEN_ENV,
+} from "./runtime.js";
+export type { RuntimeConfig, RuntimeStatus } from "./runtime.js";
+
 export type {
   AgentToken,
   DelegationRequest,

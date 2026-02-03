@@ -105,6 +105,58 @@ export class Broker {
     return this.tokenService.deserialize(serialized);
   }
 
+  /**
+   * Refresh a token, extending its expiry (requires system:token:refresh scope)
+   *
+   * @param token - Token to refresh
+   * @param ttlMinutes - New TTL in minutes (optional, defaults to original TTL)
+   * @returns Refreshed token with new expiry
+   */
+  refreshToken(token: AgentToken, ttlMinutes?: number): AgentToken {
+    // Verify the token first
+    const verification = this.tokenService.verify(token);
+    if (!verification.valid) {
+      throw new Error(`Cannot refresh invalid token: ${verification.error}`);
+    }
+
+    // Check for refresh scope
+    const hasRefreshScope = token.scopes.some(
+      (s) => s === "system:token:refresh" || s === "system:*" || s === "*"
+    );
+    if (!hasRefreshScope) {
+      throw new Error("Token does not have system:token:refresh scope");
+    }
+
+    // Calculate new expiry
+    const now = new Date();
+    let newExpiresAt: string | undefined;
+
+    if (token.expiresAt) {
+      // Default to same TTL as original
+      const originalExpiry = new Date(token.expiresAt);
+      const originalTtlMs = ttlMinutes
+        ? ttlMinutes * 60 * 1000
+        : Math.max(originalExpiry.getTime() - now.getTime(), 60 * 60 * 1000); // At least 1 hour
+
+      newExpiresAt = new Date(now.getTime() + originalTtlMs).toISOString();
+
+      // Cap at maxExpiresAt if set
+      if (token.maxExpiresAt) {
+        const maxExpiry = new Date(token.maxExpiresAt);
+        if (new Date(newExpiresAt) > maxExpiry) {
+          newExpiresAt = token.maxExpiresAt;
+        }
+        // Check if already at max
+        if (now >= maxExpiry) {
+          throw new Error("Token has reached maximum lifetime");
+        }
+      }
+    }
+
+    // Create refreshed token with same capabilities but new expiry
+    return this.tokenService.createRefreshedToken(token, newExpiresAt);
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // CREDENTIAL OPERATIONS
   // ─────────────────────────────────────────────────────────────────
@@ -228,5 +280,56 @@ export class Broker {
    */
   getConfigService(): ConfigService {
     return this.configService;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // CACHE MANAGEMENT
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Clear the credential cache
+   */
+  clearCredentialCache(): void {
+    this.credentialCache.clear();
+  }
+
+  /**
+   * Get credential cache statistics
+   */
+  getCacheStats(): { size: number; entries: Array<{ key: string; expiresAt: string }> } {
+    const entries = Array.from(this.credentialCache.entries()).map(
+      ([key, entry]) => ({
+        key,
+        expiresAt: entry.expiresAt.toISOString(),
+      })
+    );
+    return {
+      size: this.credentialCache.size,
+      entries,
+    };
+  }
+
+  /**
+   * Evict expired entries from the cache
+   */
+  evictExpiredCredentials(): number {
+    const now = Date.now();
+    let evicted = 0;
+
+    for (const [key, entry] of this.credentialCache.entries()) {
+      if (entry.expiresAt.getTime() - this.cacheBuffer <= now) {
+        this.credentialCache.delete(key);
+        evicted++;
+      }
+    }
+
+    return evicted;
+  }
+
+  /**
+   * Set the cache buffer (ms before expiry to evict)
+   */
+  setCacheBuffer(bufferMs: number): void {
+    this.cacheBuffer = bufferMs;
   }
 }
