@@ -15,6 +15,9 @@ export { TokenService, generateSecret, scopeMatches, resourceMatches } from "./t
 export { ConfigService } from "./config.js";
 
 export { GitHubProvider } from "./providers/github.js";
+export { GoogleProvider } from "./providers/google.js";
+export { AWSProvider } from "./providers/aws.js";
+export { APIKeyProvider, APIKeyProviderFactory } from "./providers/apikey.js";
 
 export {
   AgentRuntime,
@@ -32,6 +35,9 @@ export type {
   Constraints,
   ScopeConstraint,
   GitHubProviderConfig,
+  GoogleProviderConfig,
+  AWSProviderConfig,
+  APIKeyProviderConfig,
   BrokerConfig,
   SerializedToken,
 } from "./types.js";

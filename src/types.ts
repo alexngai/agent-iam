@@ -81,16 +81,53 @@ export interface GitHubProviderConfig {
   privateKeyPath: string;
 }
 
-/** Generic provider configuration */
-export interface GenericProviderConfig {
-  /** API key or token */
+/** Google OAuth provider configuration */
+export interface GoogleProviderConfig {
+  /** OAuth2 Client ID */
+  clientId: string;
+  /** OAuth2 Client Secret */
+  clientSecret: string;
+  /** Refresh token from initial OAuth flow */
+  refreshToken: string;
+}
+
+/** AWS STS provider configuration */
+export interface AWSProviderConfig {
+  /** AWS region */
+  region: string;
+  /** IAM Role ARN to assume */
+  roleArn: string;
+  /** External ID for role assumption (optional) */
+  externalId?: string;
+  /** Session duration in seconds (default: 3600) */
+  sessionDuration?: number;
+  /** AWS access key ID (optional, uses default credential chain if not provided) */
+  accessKeyId?: string;
+  /** AWS secret access key (optional) */
+  secretAccessKey?: string;
+}
+
+/** API Key provider configuration */
+export interface APIKeyProviderConfig {
+  /** The API key/token */
   apiKey: string;
+  /** Provider name for identification (e.g., "openai", "anthropic") */
+  providerName: string;
+  /** How long credentials should be considered valid (in minutes, default: 60) */
+  ttlMinutes?: number;
+  /** Optional base URL for the API */
+  baseUrl?: string;
+  /** Additional headers to include */
+  additionalHeaders?: Record<string, string>;
 }
 
 /** Provider configurations */
 export interface ProvidersConfig {
   github?: GitHubProviderConfig;
-  [provider: string]: GitHubProviderConfig | GenericProviderConfig | undefined;
+  google?: GoogleProviderConfig;
+  aws?: AWSProviderConfig;
+  apikeys?: Record<string, APIKeyProviderConfig>;
+  [provider: string]: GitHubProviderConfig | GoogleProviderConfig | AWSProviderConfig | Record<string, APIKeyProviderConfig> | undefined;
 }
 
 /** Broker configuration stored in config.json */

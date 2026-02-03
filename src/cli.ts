@@ -31,10 +31,19 @@ configCmd
 
 configCmd
   .command("init <provider>")
-  .description("Initialize a provider")
+  .description("Initialize a provider (github, google, aws)")
   .option("--app-id <appId>", "GitHub App ID")
   .option("--installation-id <installationId>", "GitHub Installation ID")
   .option("--private-key <path>", "Path to private key file")
+  .option("--client-id <clientId>", "Google OAuth Client ID")
+  .option("--client-secret <clientSecret>", "Google OAuth Client Secret")
+  .option("--refresh-token <refreshToken>", "Google OAuth Refresh Token")
+  .option("--region <region>", "AWS region")
+  .option("--role-arn <roleArn>", "AWS IAM Role ARN")
+  .option("--external-id <externalId>", "AWS External ID for role assumption")
+  .option("--session-duration <seconds>", "AWS session duration in seconds")
+  .option("--access-key-id <accessKeyId>", "AWS Access Key ID")
+  .option("--secret-access-key <secretAccessKey>", "AWS Secret Access Key")
   .action((provider, options) => {
     const broker = new Broker();
 
@@ -52,8 +61,38 @@ configCmd
           privateKeyPath: options.privateKey,
         });
         console.log("GitHub provider configured successfully");
+      } else if (provider === "google") {
+        if (!options.clientId || !options.clientSecret || !options.refreshToken) {
+          console.error(
+            "Google provider requires --client-id, --client-secret, and --refresh-token"
+          );
+          process.exit(1);
+        }
+        broker.initProvider("google", {
+          clientId: options.clientId,
+          clientSecret: options.clientSecret,
+          refreshToken: options.refreshToken,
+        });
+        console.log("Google provider configured successfully");
+      } else if (provider === "aws") {
+        if (!options.region || !options.roleArn) {
+          console.error("AWS provider requires --region and --role-arn");
+          process.exit(1);
+        }
+        broker.initProvider("aws", {
+          region: options.region,
+          roleArn: options.roleArn,
+          externalId: options.externalId,
+          sessionDuration: options.sessionDuration,
+          accessKeyId: options.accessKeyId,
+          secretAccessKey: options.secretAccessKey,
+        });
+        console.log("AWS provider configured successfully");
       } else {
-        console.error(`Unknown provider: ${provider}`);
+        console.error(
+          `Unknown provider: ${provider}. Use "github", "google", or "aws".`
+        );
+        console.error('For API keys, use "agent-iam apikey add"');
         process.exit(1);
       }
     } catch (error) {
@@ -61,6 +100,79 @@ configCmd
         `Error: ${error instanceof Error ? error.message : String(error)}`
       );
       process.exit(1);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
+// API KEY COMMANDS
+// ─────────────────────────────────────────────────────────────────
+
+const apikeyCmd = program.command("apikey").description("Manage API keys");
+
+apikeyCmd
+  .command("add")
+  .description("Add an API key")
+  .requiredOption("--name <name>", "Unique name for this API key")
+  .requiredOption("--provider <provider>", "Provider name (e.g., openai, anthropic, stripe)")
+  .requiredOption("--key <apiKey>", "The API key")
+  .option("--base-url <url>", "Base URL for the API")
+  .option("--ttl <minutes>", "TTL in minutes for issued credentials", "60")
+  .action((options) => {
+    const broker = new Broker();
+
+    try {
+      broker.addAPIKey({
+        name: options.name,
+        providerName: options.provider,
+        apiKey: options.key,
+        baseUrl: options.baseUrl,
+        ttlMinutes: parseInt(options.ttl, 10),
+      });
+      console.log(`API key "${options.name}" added successfully`);
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+apikeyCmd
+  .command("remove <name>")
+  .description("Remove an API key")
+  .action((name) => {
+    const broker = new Broker();
+
+    try {
+      const removed = broker.removeAPIKey(name);
+      if (removed) {
+        console.log(`API key "${name}" removed successfully`);
+      } else {
+        console.error(`API key "${name}" not found`);
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+apikeyCmd
+  .command("list")
+  .description("List configured API keys")
+  .action(() => {
+    const broker = new Broker();
+    const keys = broker.listAPIKeys();
+
+    if (keys.length === 0) {
+      console.log("No API keys configured");
+    } else {
+      console.log("Configured API keys:");
+      for (const key of keys) {
+        console.log(`  - ${key}`);
+      }
     }
   });
 

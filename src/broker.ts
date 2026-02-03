@@ -9,10 +9,16 @@ import type {
   VerificationResult,
   Constraints,
   GitHubProviderConfig,
+  GoogleProviderConfig,
+  AWSProviderConfig,
+  APIKeyProviderConfig,
 } from "./types.js";
 import { TokenService } from "./token.js";
 import { ConfigService } from "./config.js";
 import { GitHubProvider } from "./providers/github.js";
+import { GoogleProvider } from "./providers/google.js";
+import { AWSProvider } from "./providers/aws.js";
+import { APIKeyProvider } from "./providers/apikey.js";
 
 /** Credential cache entry */
 interface CacheEntry {
@@ -226,9 +232,70 @@ export class Broker {
         return githubProvider.issueCredential(scope, resource);
       }
 
-      default:
+      case "google": {
+        const config = this.configService.getProviderConfig<GoogleProviderConfig>("google");
+        if (!config) {
+          throw new Error("Google provider not configured");
+        }
+        const googleProvider = new GoogleProvider(config);
+        return googleProvider.issueCredential(scope, resource);
+      }
+
+      case "aws": {
+        const config = this.configService.getProviderConfig<AWSProviderConfig>("aws");
+        if (!config) {
+          throw new Error("AWS provider not configured");
+        }
+        const awsProvider = new AWSProvider(config);
+        return awsProvider.issueCredential(scope, resource);
+      }
+
+      default: {
+        // Check if it's a configured API key provider
+        const apiKeyConfig = this.configService.getAPIKeyConfig(provider);
+        if (apiKeyConfig) {
+          return this.issueAPIKeyCredential(apiKeyConfig, scope, resource);
+        }
+
+        // Also check by provider name in apikeys config
+        const apikeys = this.configService.getProviderConfig<Record<string, APIKeyProviderConfig>>("apikeys");
+        if (apikeys) {
+          for (const [, keyConfig] of Object.entries(apikeys)) {
+            if (keyConfig.providerName === provider) {
+              return this.issueAPIKeyCredential(keyConfig, scope, resource);
+            }
+          }
+        }
+
         throw new Error(`Provider "${provider}" not supported`);
+      }
     }
+  }
+
+  /**
+   * Issue a credential from an API key configuration
+   */
+  private async issueAPIKeyCredential(
+    config: APIKeyProviderConfig,
+    _scope: string,
+    _resource: string
+  ): Promise<CredentialResult> {
+    const ttlMinutes = config.ttlMinutes ?? 60;
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+
+    return {
+      credentialType: "api_key",
+      credential: {
+        apiKey: config.apiKey,
+        providerName: config.providerName,
+        baseUrl: config.baseUrl,
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          ...config.additionalHeaders,
+        },
+      },
+      expiresAt,
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -251,9 +318,55 @@ export class Broker {
         });
         break;
 
+      case "google":
+        this.configService.initGoogle({
+          clientId: config.clientId,
+          clientSecret: config.clientSecret,
+          refreshToken: config.refreshToken,
+        });
+        break;
+
+      case "aws":
+        this.configService.initAWS({
+          region: config.region,
+          roleArn: config.roleArn,
+          externalId: config.externalId,
+          sessionDuration: config.sessionDuration ? parseInt(config.sessionDuration, 10) : undefined,
+          accessKeyId: config.accessKeyId,
+          secretAccessKey: config.secretAccessKey,
+        });
+        break;
+
       default:
-        throw new Error(`Provider "${provider}" not supported`);
+        throw new Error(`Provider "${provider}" not supported. For API keys, use addAPIKey() method.`);
     }
+  }
+
+  /**
+   * Add an API key provider
+   */
+  addAPIKey(params: {
+    name: string;
+    providerName: string;
+    apiKey: string;
+    baseUrl?: string;
+    ttlMinutes?: number;
+  }): void {
+    this.configService.addAPIKey(params);
+  }
+
+  /**
+   * Remove an API key provider
+   */
+  removeAPIKey(name: string): boolean {
+    return this.configService.removeAPIKey(name);
+  }
+
+  /**
+   * List configured API keys
+   */
+  listAPIKeys(): string[] {
+    return this.configService.listAPIKeys();
   }
 
   /**

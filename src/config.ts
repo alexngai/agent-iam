@@ -5,7 +5,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import type { BrokerConfig, ProvidersConfig, GitHubProviderConfig } from "./types.js";
+import type {
+  BrokerConfig,
+  ProvidersConfig,
+  GitHubProviderConfig,
+  GoogleProviderConfig,
+  AWSProviderConfig,
+  APIKeyProviderConfig,
+} from "./types.js";
 import { generateSecret } from "./token.js";
 
 /** Default config directory */
@@ -112,6 +119,98 @@ export class ConfigService {
     this.setProviderConfig("github", config);
   }
 
+  /** Initialize Google OAuth provider */
+  initGoogle(params: {
+    clientId: string;
+    clientSecret: string;
+    refreshToken: string;
+  }): void {
+    const config: GoogleProviderConfig = {
+      clientId: params.clientId,
+      clientSecret: params.clientSecret,
+      refreshToken: params.refreshToken,
+    };
+
+    this.setProviderConfig("google", config);
+  }
+
+  /** Initialize AWS STS provider */
+  initAWS(params: {
+    region: string;
+    roleArn: string;
+    externalId?: string;
+    sessionDuration?: number;
+    accessKeyId?: string;
+    secretAccessKey?: string;
+  }): void {
+    const config: AWSProviderConfig = {
+      region: params.region,
+      roleArn: params.roleArn,
+      externalId: params.externalId,
+      sessionDuration: params.sessionDuration,
+      accessKeyId: params.accessKeyId,
+      secretAccessKey: params.secretAccessKey,
+    };
+
+    this.setProviderConfig("aws", config);
+  }
+
+  /** Add an API key provider */
+  addAPIKey(params: {
+    name: string;
+    providerName: string;
+    apiKey: string;
+    baseUrl?: string;
+    ttlMinutes?: number;
+    additionalHeaders?: Record<string, string>;
+  }): void {
+    const config = this.loadConfig();
+
+    // Initialize apikeys if not present
+    if (!config.providers.apikeys) {
+      config.providers.apikeys = {};
+    }
+
+    const keyConfig: APIKeyProviderConfig = {
+      providerName: params.providerName,
+      apiKey: params.apiKey,
+      baseUrl: params.baseUrl,
+      ttlMinutes: params.ttlMinutes,
+      additionalHeaders: params.additionalHeaders,
+    };
+
+    config.providers.apikeys[params.name] = keyConfig;
+    this.saveConfig(config);
+  }
+
+  /** Remove an API key */
+  removeAPIKey(name: string): boolean {
+    const config = this.loadConfig();
+
+    if (!config.providers.apikeys || !config.providers.apikeys[name]) {
+      return false;
+    }
+
+    delete config.providers.apikeys[name];
+    this.saveConfig(config);
+    return true;
+  }
+
+  /** List configured API keys (names only) */
+  listAPIKeys(): string[] {
+    const config = this.loadConfig();
+    if (!config.providers.apikeys) {
+      return [];
+    }
+    return Object.keys(config.providers.apikeys);
+  }
+
+  /** Get API key configuration by name */
+  getAPIKeyConfig(name: string): APIKeyProviderConfig | undefined {
+    const config = this.loadConfig();
+    return config.providers.apikeys?.[name];
+  }
+
   /** Get the config directory path */
   getConfigDir(): string {
     return this.configDir;
@@ -125,11 +224,33 @@ export class ConfigService {
     for (const [provider, providerConfig] of Object.entries(config.providers)) {
       if (!providerConfig) continue;
 
+      // Handle nested apikeys specially
+      if (provider === "apikeys" && typeof providerConfig === "object") {
+        const apikeysRedacted: Record<string, unknown> = {};
+        for (const [keyName, keyConfig] of Object.entries(providerConfig)) {
+          apikeysRedacted[keyName] = {
+            ...keyConfig,
+            apiKey: "***REDACTED***",
+          };
+        }
+        (redacted.providers as Record<string, unknown>)[provider] = apikeysRedacted;
+        continue;
+      }
+
       const providerRedacted: Record<string, unknown> = { ...providerConfig };
 
       // Redact sensitive fields
       if ("apiKey" in providerRedacted) {
         providerRedacted.apiKey = "***REDACTED***";
+      }
+      if ("clientSecret" in providerRedacted) {
+        providerRedacted.clientSecret = "***REDACTED***";
+      }
+      if ("refreshToken" in providerRedacted) {
+        providerRedacted.refreshToken = "***REDACTED***";
+      }
+      if ("secretAccessKey" in providerRedacted) {
+        providerRedacted.secretAccessKey = "***REDACTED***";
       }
       if ("privateKeyPath" in providerRedacted) {
         providerRedacted.privateKeyPath = providerRedacted.privateKeyPath;
