@@ -198,6 +198,29 @@ export class TokenService {
 
     // Check constraints for this scope
     const constraint = this.findConstraint(token.constraints, scope);
+
+    // Check timing constraints
+    if (constraint?.notBefore) {
+      const notBefore = new Date(constraint.notBefore);
+      if (new Date() < notBefore) {
+        return {
+          valid: false,
+          error: `Scope "${scope}" not valid before ${constraint.notBefore}`,
+        };
+      }
+    }
+
+    if (constraint?.notAfter) {
+      const notAfter = new Date(constraint.notAfter);
+      if (new Date() > notAfter) {
+        return {
+          valid: false,
+          error: `Scope "${scope}" expired at ${constraint.notAfter}`,
+        };
+      }
+    }
+
+    // Check resource constraints
     if (constraint?.resources) {
       const resourceAllowed = constraint.resources.some((pattern) =>
         resourceMatches(pattern, resource)
