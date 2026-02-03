@@ -346,4 +346,217 @@ program
     console.log(JSON.stringify(status, null, 2));
   });
 
+// ─────────────────────────────────────────────────────────────────
+// DISTRIBUTED MODE COMMANDS
+// ─────────────────────────────────────────────────────────────────
+
+import { LeaderServer, FollowerClient, BrokerMode } from "./distributed/index.js";
+
+program
+  .command("serve")
+  .description("Start the leader HTTP server for distributed mode")
+  .option("--port <port>", "Port to listen on", "8443")
+  .option("--host <host>", "Host to bind to", "0.0.0.0")
+  .option("--auth-token <token>", "Authentication token for followers")
+  .option("--tls-cert <path>", "Path to TLS certificate")
+  .option("--tls-key <path>", "Path to TLS private key")
+  .action(async (options) => {
+    const broker = new Broker();
+
+    if (!options.authToken) {
+      console.error("Error: --auth-token is required for secure follower authentication");
+      process.exit(1);
+    }
+
+    const leader = new LeaderServer(broker, broker.getConfigDir(), {
+      port: parseInt(options.port, 10),
+      host: options.host,
+      followerAuthToken: options.authToken,
+      tlsCertPath: options.tlsCert,
+      tlsKeyPath: options.tlsKey,
+    });
+
+    try {
+      await leader.start();
+      console.log(`Leader server started on ${options.host}:${options.port}`);
+      console.log("Press Ctrl+C to stop");
+
+      // Handle shutdown
+      process.on("SIGINT", async () => {
+        console.log("\nShutting down...");
+        await leader.stop();
+        process.exit(0);
+      });
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+program
+  .command("rotate-key")
+  .description("Rotate the signing key (leader mode)")
+  .option("--auth-token <token>", "Leader authentication token")
+  .option("--leader-url <url>", "Leader URL (if running remotely)")
+  .action(async (options) => {
+    if (options.leaderUrl) {
+      // Remote rotation via HTTP
+      if (!options.authToken) {
+        console.error("Error: --auth-token is required for remote rotation");
+        process.exit(1);
+      }
+
+      try {
+        const response = await fetch(`${options.leaderUrl}/rotate-key`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${options.authToken}`,
+          },
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Rotation failed: ${error}`);
+        }
+
+        const result = await response.json() as { version: number };
+        console.log(`Key rotated to version ${result.version}`);
+      } catch (error) {
+        console.error(
+          `Error: ${error instanceof Error ? error.message : String(error)}`
+        );
+        process.exit(1);
+      }
+    } else {
+      // Local rotation (direct access to config)
+      const broker = new Broker();
+      const { SigningKeyManager } = await import("./distributed/index.js");
+      const keyManager = new SigningKeyManager(broker.getConfigDir());
+      const { version } = keyManager.rotate();
+      console.log(`Key rotated to version ${version}`);
+    }
+  });
+
+program
+  .command("revoke <tokenId>")
+  .description("Revoke a token")
+  .option("--reason <reason>", "Reason for revocation")
+  .option("--auth-token <token>", "Leader authentication token")
+  .option("--leader-url <url>", "Leader URL (if running remotely)")
+  .action(async (tokenId, options) => {
+    if (options.leaderUrl) {
+      // Remote revocation via HTTP
+      if (!options.authToken) {
+        console.error("Error: --auth-token is required for remote revocation");
+        process.exit(1);
+      }
+
+      try {
+        const response = await fetch(`${options.leaderUrl}/revoke/${tokenId}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${options.authToken}`,
+          },
+          body: JSON.stringify({ reason: options.reason }),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Revocation failed: ${error}`);
+        }
+
+        console.log(`Token ${tokenId} revoked`);
+      } catch (error) {
+        console.error(
+          `Error: ${error instanceof Error ? error.message : String(error)}`
+        );
+        process.exit(1);
+      }
+    } else {
+      // Local revocation
+      const broker = new Broker();
+      const { RevocationList } = await import("./distributed/index.js");
+      const revocationList = new RevocationList(broker.getConfigDir());
+      revocationList.revoke({
+        tokenId,
+        agentId: tokenId,
+        reason: options.reason,
+      });
+      console.log(`Token ${tokenId} revoked locally`);
+    }
+  });
+
+program
+  .command("sync")
+  .description("Force sync from leader (follower mode)")
+  .requiredOption("--leader-url <url>", "Leader URL")
+  .requiredOption("--auth-token <token>", "Authentication token")
+  .requiredOption("--follower-id <id>", "Follower identifier")
+  .action(async (options) => {
+    const broker = new Broker();
+
+    const follower = new FollowerClient(broker, broker.getConfigDir(), {
+      leaderUrl: options.leaderUrl,
+      leaderAuthToken: options.authToken,
+      followerId: options.followerId,
+    });
+
+    try {
+      await follower.sync();
+      const status = follower.getStatus();
+      console.log("Sync completed successfully");
+      console.log(JSON.stringify(status, null, 2));
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+program
+  .command("follower")
+  .description("Start as a follower (syncs from leader)")
+  .requiredOption("--leader-url <url>", "Leader URL")
+  .requiredOption("--auth-token <token>", "Authentication token")
+  .requiredOption("--follower-id <id>", "Follower identifier")
+  .option("--sync-interval <seconds>", "Sync interval in seconds", "60")
+  .action(async (options) => {
+    const broker = new Broker();
+
+    const follower = new FollowerClient(broker, broker.getConfigDir(), {
+      leaderUrl: options.leaderUrl,
+      leaderAuthToken: options.authToken,
+      followerId: options.followerId,
+      syncIntervalSeconds: parseInt(options.syncInterval, 10),
+    });
+
+    try {
+      await follower.start();
+      console.log(`Follower started, syncing from ${options.leaderUrl}`);
+      console.log("Press Ctrl+C to stop");
+
+      // Handle shutdown
+      process.on("SIGINT", () => {
+        console.log("\nShutting down...");
+        follower.stop();
+        process.exit(0);
+      });
+
+      // Keep running and periodically show status
+      setInterval(() => {
+        const status = follower.getDetailedStatus();
+        console.log(`[${new Date().toISOString()}] State: ${status.state}, Key: v${status.signingKeyVersion}, Revocations: ${status.revocationCount}`);
+      }, 30000);
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
 program.parse();

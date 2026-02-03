@@ -395,6 +395,13 @@ export class Broker {
     return this.configService;
   }
 
+  /**
+   * Get the config directory path
+   */
+  getConfigDir(): string {
+    return this.configService.getConfigDir();
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // CACHE MANAGEMENT
   // ─────────────────────────────────────────────────────────────────

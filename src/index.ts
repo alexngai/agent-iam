@@ -19,6 +19,26 @@ export { GoogleProvider } from "./providers/google.js";
 export { AWSProvider } from "./providers/aws.js";
 export { APIKeyProvider, APIKeyProviderFactory } from "./providers/apikey.js";
 
+// Distributed mode
+export {
+  LeaderServer,
+  FollowerClient,
+  SigningKeyManager,
+  RevocationList,
+  BrokerMode,
+  FollowerState,
+  STATE_THRESHOLDS,
+} from "./distributed/index.js";
+export type {
+  SyncRequest,
+  SyncResponse,
+  DistributedStatus,
+  FollowerConfig,
+  LeaderConfig,
+  RevokedToken,
+  VersionedKey,
+} from "./distributed/index.js";
+
 export {
   AgentRuntime,
   withRuntime,
