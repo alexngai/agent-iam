@@ -1,6 +1,6 @@
 # Agent Credential Broker: Design Specification
 
-**Version:** 1.1  
+**Version:** 1.2  
 **Status:** Draft  
 **Last Updated:** February 2025
 
@@ -18,7 +18,8 @@
 8. [Distributed Extension](#8-distributed-extension)
 9. [API Reference](#9-api-reference)
 10. [Implementation Roadmap](#10-implementation-roadmap)
-11. [Appendices](#11-appendices)
+11. [Extensibility & Migration Paths](#11-extensibility--migration-paths)
+12. [Appendices](#12-appendices)
 
 ---
 
@@ -2062,9 +2063,834 @@ WebSocket /ws
 
 ---
 
-## 11. Appendices
+## 11. Extensibility & Migration Paths
 
-### Appendix A: Comparison with Alternatives
+This section documents the architectural seams that enable future integration with industry-standard systems, and provides migration paths for each component.
+
+### 11.1 Design Philosophy
+
+The system is designed with explicit adapter seams, allowing each component to be replaced independently:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ADAPTER SEAM ARCHITECTURE                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │                         CORE BROKER                                  │   │
+│   │                                                                      │   │
+│   │   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐       │   │
+│   │   │    TOKEN     │     │   POLICY     │     │  CREDENTIAL  │       │   │
+│   │   │   SERVICE    │     │   SERVICE    │     │   SERVICE    │       │   │
+│   │   │  (Protocol)  │     │  (Protocol)  │     │  (Protocol)  │       │   │
+│   │   └──────┬───────┘     └──────┬───────┘     └──────┬───────┘       │   │
+│   │          │                    │                    │               │   │
+│   │   ┌──────┴───────┐     ┌──────┴───────┐     ┌──────┴───────┐       │   │
+│   │   │   ADAPTER    │     │   ADAPTER    │     │   ADAPTER    │       │   │
+│   │   │    SEAM      │     │    SEAM      │     │    SEAM      │       │   │
+│   │   └──────┬───────┘     └──────┬───────┘     └──────┬───────┘       │   │
+│   │          │                    │                    │               │   │
+│   └──────────┼────────────────────┼────────────────────┼───────────────┘   │
+│              │                    │                    │                    │
+│   ┌──────────┼────────────────────┼────────────────────┼───────────────┐   │
+│   │          ▼                    ▼                    ▼               │   │
+│   │   ┌────────────┐       ┌────────────┐       ┌────────────┐        │   │
+│   │   │  Simple    │       │  Simple    │       │  Simple    │        │   │
+│   │   │  (Default) │       │  (Default) │       │  (Default) │        │   │
+│   │   └────────────┘       └────────────┘       └────────────┘        │   │
+│   │                                                                    │   │
+│   │   ┌────────────┐       ┌────────────┐       ┌────────────┐        │   │
+│   │   │  Biscuit   │       │    OPA     │       │   Vault    │        │   │
+│   │   │  Adapter   │       │  Adapter   │       │  Adapter   │        │   │
+│   │   └────────────┘       └────────────┘       └────────────┘        │   │
+│   │                                                                    │   │
+│   │   ┌────────────┐       ┌────────────┐       ┌────────────┐        │   │
+│   │   │   UCAN     │       │   Cedar    │       │ Infisical  │        │   │
+│   │   │  Adapter   │       │  Adapter   │       │  Adapter   │        │   │
+│   │   └────────────┘       └────────────┘       └────────────┘        │   │
+│   │          IMPLEMENTATIONS (Swappable)                               │   │
+│   └────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│   Similarly for: Identity, Sync, Revocation services                        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key principle:** Build simple implementations first, define clean interfaces, add adapters when enterprise requirements emerge.
+
+### 11.2 Service Interfaces
+
+Each core service is defined as a Protocol (interface) with a simple default implementation:
+
+#### 11.2.1 Token Service Interface
+
+```python
+class TokenService(Protocol):
+    """
+    Interface for token creation, verification, and attenuation.
+    
+    Implementations:
+    - SimpleTokenService: HMAC-signed tokens (default)
+    - BiscuitTokenService: Biscuit tokens with Datalog policies
+    - UCANTokenService: UCAN tokens with embedded proof chains
+    """
+    
+    def create(self, claims: TokenClaims) -> Token:
+        """Create a new token with the given claims."""
+        ...
+    
+    def verify(self, token: Token) -> VerificationResult:
+        """Verify token signature and basic validity."""
+        ...
+    
+    def attenuate(self, token: Token, restrictions: Restrictions) -> Token:
+        """Create a new token with narrower permissions."""
+        ...
+    
+    def encode(self, token: Token) -> str:
+        """Encode token for transport (e.g., base64)."""
+        ...
+    
+    def decode(self, encoded: str) -> Token:
+        """Decode token from transport format."""
+        ...
+```
+
+#### 11.2.2 Policy Service Interface
+
+```python
+class PolicyService(Protocol):
+    """
+    Interface for authorization policy evaluation.
+    
+    Implementations:
+    - SimplePolicyService: Inline scope/constraint matching (default)
+    - OPAPolicyService: Open Policy Agent with Rego policies
+    - CedarPolicyService: AWS Cedar policy language
+    """
+    
+    def check(
+        self,
+        token: Token,
+        action: str,
+        resource: str,
+        context: Optional[dict] = None
+    ) -> PolicyDecision:
+        """
+        Check if token allows action on resource.
+        
+        Returns:
+            PolicyDecision with allowed/denied and optional explanation
+        """
+        ...
+    
+    def list_permissions(self, token: Token) -> list[Permission]:
+        """List all permissions granted by token."""
+        ...
+```
+
+#### 11.2.3 Credential Service Interface
+
+```python
+class CredentialService(Protocol):
+    """
+    Interface for provider credential issuance.
+    
+    Implementations:
+    - SimpleCredentialService: Direct provider API calls (default)
+    - VaultCredentialService: HashiCorp Vault secrets engines
+    - InfisicalCredentialService: Infisical dynamic secrets
+    """
+    
+    def issue(
+        self,
+        provider: str,
+        scope: str,
+        resource: str,
+        ttl: Optional[timedelta] = None
+    ) -> Credential:
+        """Issue a credential for the given scope and resource."""
+        ...
+    
+    def revoke(self, credential: Credential) -> bool:
+        """Revoke a credential (if supported by provider)."""
+        ...
+    
+    def list_providers(self) -> list[str]:
+        """List configured providers."""
+        ...
+```
+
+#### 11.2.4 Identity Service Interface
+
+```python
+class IdentityService(Protocol):
+    """
+    Interface for agent identity.
+    
+    Implementations:
+    - SimpleIdentityService: String-based agent IDs (default)
+    - SPIFFEIdentityService: SPIFFE/SPIRE workload identity
+    - DIDIdentityService: Decentralized Identifiers
+    """
+    
+    def get_identity(self) -> AgentIdentity:
+        """Get identity for current agent/workload."""
+        ...
+    
+    def verify_identity(self, identity: AgentIdentity) -> bool:
+        """Verify an identity claim."""
+        ...
+    
+    def create_identity(self, name: str, metadata: dict) -> AgentIdentity:
+        """Create a new identity (if supported)."""
+        ...
+```
+
+#### 11.2.5 Sync Service Interface
+
+```python
+class SyncService(Protocol):
+    """
+    Interface for distributed state synchronization.
+    
+    Implementations:
+    - SimpleSyncService: HTTP-based leader/follower (default)
+    - ConsulSyncService: Consul KV-based sync
+    - EtcdSyncService: etcd-based sync
+    """
+    
+    async def sync(self) -> SyncResult:
+        """Pull latest state from upstream."""
+        ...
+    
+    async def push(self, update: SyncUpdate) -> bool:
+        """Push update to downstream (leader only)."""
+        ...
+    
+    def get_state(self) -> SyncState:
+        """Get current sync state."""
+        ...
+    
+    @property
+    def is_connected(self) -> bool:
+        """Whether currently connected to upstream."""
+        ...
+```
+
+#### 11.2.6 Revocation Service Interface
+
+```python
+class RevocationService(Protocol):
+    """
+    Interface for token revocation.
+    
+    Implementations:
+    - SimpleRevocationService: Local set + synced list (default)
+    - ZanzibarRevocationService: SpiceDB/Zanzibar relationship-based
+    - WebhookRevocationService: External revocation check via webhook
+    """
+    
+    def is_revoked(self, token: Token) -> bool:
+        """Check if token is revoked."""
+        ...
+    
+    def revoke(self, token: Token, reason: str) -> bool:
+        """Revoke a token."""
+        ...
+    
+    def list_revocations(self, since: Optional[datetime] = None) -> list[Revocation]:
+        """List revocations, optionally since a timestamp."""
+        ...
+```
+
+### 11.3 Industry Systems Comparison
+
+#### 11.3.1 Token Format Systems
+
+| System | Description | When to Adopt |
+|--------|-------------|---------------|
+| **Macaroons** | Google's capability tokens with caveats | Legacy compatibility |
+| **Biscuit** | Datalog-based capability tokens with formal verification | Need complex policy logic, formal verification |
+| **UCAN** | JWT-based tokens with embedded proof chains | Decentralized/Web3 environments, fully offline |
+| **Our Simple Tokens** | HMAC-signed JSON tokens | Default, simple cases |
+
+**Biscuit Migration Example:**
+
+```python
+class BiscuitTokenService(TokenService):
+    """Biscuit implementation of TokenService."""
+    
+    def __init__(self, root_key: biscuit.PrivateKey):
+        self.root_key = root_key
+    
+    def create(self, claims: TokenClaims) -> Token:
+        builder = biscuit.BiscuitBuilder(self.root_key)
+        
+        # Map our claims to Biscuit facts
+        for scope in claims.scopes:
+            builder.add_authority_fact(f'right("{scope}")')
+        
+        for scope, constraint in claims.constraints.items():
+            for resource in constraint.get("resources", []):
+                builder.add_authority_fact(f'allowed_resource("{scope}", "{resource}")')
+        
+        builder.add_authority_fact(f'max_depth({claims.max_depth})')
+        builder.add_authority_fact(f'expires({claims.expires_at.isoformat()})')
+        
+        biscuit_token = builder.build()
+        
+        return Token(
+            format="biscuit",
+            data=biscuit_token.to_base64(),
+            claims=claims
+        )
+    
+    def verify(self, token: Token) -> VerificationResult:
+        try:
+            biscuit_token = biscuit.Biscuit.from_base64(
+                token.data, 
+                self.root_key.public()
+            )
+            
+            authorizer = biscuit.Authorizer()
+            authorizer.add_token(biscuit_token)
+            authorizer.add_fact(f'time({datetime.utcnow().isoformat()})')
+            authorizer.add_policy("allow if true")
+            authorizer.authorize()
+            
+            return VerificationResult(valid=True)
+        except Exception as e:
+            return VerificationResult(valid=False, error=str(e))
+    
+    def attenuate(self, token: Token, restrictions: Restrictions) -> Token:
+        biscuit_token = biscuit.Biscuit.from_base64(
+            token.data,
+            self.root_key.public()
+        )
+        
+        # Add attenuation block with checks
+        block = biscuit.BlockBuilder()
+        
+        if restrictions.allowed_scopes:
+            scope_check = " || ".join(f'right("{s}")' for s in restrictions.allowed_scopes)
+            block.add_check(f'check if {scope_check}')
+        
+        if restrictions.allowed_resources:
+            for scope, resources in restrictions.allowed_resources.items():
+                for resource in resources:
+                    block.add_check(f'check if allowed_resource("{scope}", "{resource}")')
+        
+        if restrictions.expires_at:
+            block.add_check(f'check if time($t), $t < {restrictions.expires_at.isoformat()}')
+        
+        attenuated = biscuit_token.attenuate(block)
+        
+        return Token(
+            format="biscuit",
+            data=attenuated.to_base64(),
+            claims=self._extract_claims(attenuated)
+        )
+```
+
+#### 11.3.2 Policy Evaluation Systems
+
+| System | Description | When to Adopt |
+|--------|-------------|---------------|
+| **OPA/Rego** | General-purpose policy engine | Complex dynamic policies, policy testing |
+| **Cedar** | AWS's policy language | AWS integration, formal verification |
+| **Zanzibar/SpiceDB** | Relationship-based access control | Complex permission hierarchies |
+| **Our Simple Matcher** | Inline scope/constraint matching | Default, simple cases |
+
+**OPA Migration Example:**
+
+```python
+class OPAPolicyService(PolicyService):
+    """OPA implementation of PolicyService."""
+    
+    def __init__(self, opa_url: str = "http://localhost:8181"):
+        self.opa_url = opa_url
+    
+    def check(
+        self,
+        token: Token,
+        action: str,
+        resource: str,
+        context: Optional[dict] = None
+    ) -> PolicyDecision:
+        input_data = {
+            "token": {
+                "agent_id": token.claims.agent_id,
+                "scopes": token.claims.scopes,
+                "constraints": token.claims.constraints,
+                "depth": token.claims.current_depth,
+            },
+            "action": action,
+            "resource": resource,
+            "context": context or {},
+        }
+        
+        response = httpx.post(
+            f"{self.opa_url}/v1/data/agentbroker/authz",
+            json={"input": input_data}
+        )
+        
+        result = response.json().get("result", {})
+        
+        return PolicyDecision(
+            allowed=result.get("allow", False),
+            reason=result.get("reason"),
+            obligations=result.get("obligations", [])
+        )
+```
+
+**OPA Policy (Rego):**
+
+```rego
+package agentbroker.authz
+
+default allow = false
+
+# Allow if token has matching scope and resource is permitted
+allow {
+    some scope in input.token.scopes
+    scope_matches(scope, input.action)
+    resource_permitted(input.action, input.resource)
+}
+
+# Scope matching with wildcards
+scope_matches(scope, action) {
+    scope == action
+}
+
+scope_matches(scope, action) {
+    endswith(scope, ":*")
+    prefix := trim_suffix(scope, "*")
+    startswith(action, prefix)
+}
+
+# Resource constraint checking
+resource_permitted(action, resource) {
+    constraint := input.token.constraints[action]
+    some pattern in constraint.resources
+    glob.match(pattern, ["/"], resource)
+}
+
+resource_permitted(action, resource) {
+    not input.token.constraints[action]  # No constraint = all allowed
+}
+
+# Provide reason for denial
+reason = msg {
+    not allow
+    not any_scope_matches
+    msg := "No matching scope in token"
+}
+
+reason = msg {
+    not allow
+    any_scope_matches
+    msg := "Resource not permitted by constraints"
+}
+
+any_scope_matches {
+    some scope in input.token.scopes
+    scope_matches(scope, input.action)
+}
+```
+
+#### 11.3.3 Credential Issuance Systems
+
+| System | Description | When to Adopt |
+|--------|-------------|---------------|
+| **HashiCorp Vault** | Enterprise secrets management | Enterprise deployment, audit requirements |
+| **Infisical** | Open-source secrets management | Team deployment, lighter weight than Vault |
+| **Cloud KMS** | AWS/GCP/Azure native | Cloud-native deployment |
+| **Our Simple Adapters** | Direct provider API calls | Default, simple cases |
+
+**Vault Migration Example:**
+
+```python
+class VaultCredentialService(CredentialService):
+    """Vault implementation of CredentialService."""
+    
+    def __init__(self, vault_url: str, vault_token: str):
+        self.client = hvac.Client(url=vault_url, token=vault_token)
+    
+    def issue(
+        self,
+        provider: str,
+        scope: str,
+        resource: str,
+        ttl: Optional[timedelta] = None
+    ) -> Credential:
+        if provider == "github":
+            return self._issue_github(scope, resource, ttl)
+        elif provider == "aws":
+            return self._issue_aws(scope, resource, ttl)
+        elif provider == "google":
+            return self._issue_google(scope, resource, ttl)
+        else:
+            return self._issue_kv(provider, scope, resource)
+    
+    def _issue_github(self, scope: str, resource: str, ttl: Optional[timedelta]) -> Credential:
+        # Use Vault's GitHub secrets engine
+        permissions = self._scope_to_github_permissions(scope)
+        
+        response = self.client.secrets.github.generate_token(
+            mount_point="github",
+            installation_id=self._get_installation_id(resource),
+            repository_ids=[self._get_repo_id(resource)],
+            permissions=permissions
+        )
+        
+        return Credential(
+            provider="github",
+            credential_type="bearer_token",
+            data={"token": response["data"]["token"]},
+            expires_at=datetime.fromisoformat(response["data"]["expires_at"])
+        )
+    
+    def _issue_aws(self, scope: str, resource: str, ttl: Optional[timedelta]) -> Credential:
+        # Use Vault's AWS secrets engine
+        response = self.client.secrets.aws.generate_credentials(
+            name="agent-role",
+            role_arn=self._get_role_arn(resource),
+            ttl=str(int(ttl.total_seconds())) + "s" if ttl else None
+        )
+        
+        return Credential(
+            provider="aws",
+            credential_type="aws_credentials",
+            data={
+                "access_key_id": response["data"]["access_key"],
+                "secret_access_key": response["data"]["secret_key"],
+                "session_token": response["data"]["security_token"]
+            },
+            expires_at=datetime.utcnow() + timedelta(seconds=response["lease_duration"])
+        )
+```
+
+#### 11.3.4 Identity Systems
+
+| System | Description | When to Adopt |
+|--------|-------------|---------------|
+| **SPIFFE/SPIRE** | Workload identity | Need workload attestation, zero-trust |
+| **DIDs** | Decentralized identifiers | Decentralized environments |
+| **Our Simple IDs** | String-based agent IDs | Default, simple cases |
+
+**SPIFFE Migration Example:**
+
+```python
+class SPIFFEIdentityService(IdentityService):
+    """SPIFFE/SPIRE implementation of IdentityService."""
+    
+    def __init__(self, workload_api_addr: str = "unix:///tmp/spire-agent/public/api.sock"):
+        self.workload_api = workload_api_addr
+        self._source = None
+    
+    def _get_source(self):
+        if not self._source:
+            self._source = spiffe.WorkloadApiSource(self.workload_api)
+        return self._source
+    
+    def get_identity(self) -> AgentIdentity:
+        source = self._get_source()
+        svid = source.get_x509_svid()
+        
+        return AgentIdentity(
+            id=str(svid.spiffe_id),  # e.g., "spiffe://example.com/agent/research"
+            type="spiffe",
+            certificate=svid.cert_chain_pem,
+            metadata={
+                "trust_domain": svid.spiffe_id.trust_domain,
+                "path": svid.spiffe_id.path,
+            }
+        )
+    
+    def verify_identity(self, identity: AgentIdentity) -> bool:
+        if identity.type != "spiffe":
+            return False
+        
+        source = self._get_source()
+        bundle = source.get_bundle()
+        
+        # Verify the certificate chain against the trust bundle
+        try:
+            spiffe.verify_x509_svid(
+                identity.certificate,
+                bundle,
+                expected_spiffe_id=identity.id
+            )
+            return True
+        except spiffe.VerificationError:
+            return False
+```
+
+### 11.4 Migration Risk Assessment
+
+| Component | Current | Replace With | Effort | Risk | Offline Impact |
+|-----------|---------|--------------|--------|------|----------------|
+| Token format | SimpleToken | Biscuit | 2 days | Low | None |
+| Token format | SimpleToken | UCAN | 2 days | Low | Improved |
+| Policy eval | SimpleMatcher | OPA | 1 day | Low | Degraded* |
+| Policy eval | SimpleMatcher | Cedar | 1 day | Low | Degraded* |
+| Credentials | SimpleAdapters | Vault | 1-2 days | Low | Broken** |
+| Credentials | SimpleAdapters | Infisical | 1 day | Low | Broken** |
+| Identity | StringIDs | SPIFFE | 1 day | Low | Degraded* |
+| Sync | SimpleSync | Consul | 2 days | Medium | Same |
+| Revocation | SimpleList | Zanzibar | 1 day | Low | Broken** |
+
+*Can fall back to cached/simple mode
+**Requires connectivity to external system
+
+### 11.5 What's Unique to Our Design
+
+These aspects are **not available in existing systems** and represent our core value:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    UNIQUE VALUE PROPOSITION                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. AGENT-SPECIFIC DELEGATION SEMANTICS                                     │
+│  ───────────────────────────────────────                                    │
+│                                                                              │
+│     "Create a sub-agent that can only read these 3 repos for 30 minutes"   │
+│                                                                              │
+│     No existing system has first-class support for:                         │
+│     • Parent-to-child capability delegation                                 │
+│     • Automatic scope attenuation                                           │
+│     • Depth-limited delegation chains                                       │
+│     • Per-delegation TTL constraints                                        │
+│                                                                              │
+│     Vault: Would require creating new policy + identity (heavyweight)       │
+│     OPA: Would require custom policy logic and external state              │
+│     SPIFFE: Doesn't handle authorization at all                            │
+│                                                                              │
+│  2. GRACEFUL DEGRADATION                                                    │
+│  ────────────────────────                                                   │
+│                                                                              │
+│     "Leader is down but I have cached state from 10 minutes ago.           │
+│      Continue operating with stale revocation list, warn in logs."          │
+│                                                                              │
+│     Vault: Fails closed (no Vault = no secrets)                             │
+│     OPA: Usually fails closed                                               │
+│     SPIFFE: Fails closed                                                    │
+│                                                                              │
+│     Our design explicitly supports:                                         │
+│     • Connected → Degraded → Limited → Offline state machine               │
+│     • Per-token offline grace periods                                       │
+│     • Cached state persistence across restarts                             │
+│     • Clear degradation behavior matrix                                     │
+│                                                                              │
+│  3. INTEGRATED CREDENTIAL ISSUANCE                                          │
+│  ─────────────────────────────────                                          │
+│                                                                              │
+│     "I have this token → I get a GitHub credential scoped to match"         │
+│                                                                              │
+│     Most systems separate authorization from credential issuance:           │
+│     • OPA/Zanzibar: "Are you allowed?" (doesn't issue credentials)          │
+│     • Vault: Issues credentials (but identity-based, not capability-based)  │
+│     • SPIFFE: Issues identity (doesn't do authorization or credentials)     │
+│                                                                              │
+│     Our design unifies:                                                      │
+│     • Capability verification                                                │
+│     • Scope-matched credential issuance                                     │
+│     • Credential caching with TTL alignment                                 │
+│                                                                              │
+│  4. SUBPROCESS TOKEN PASSING                                                │
+│  ───────────────────────────                                                │
+│                                                                              │
+│     "Spawn a subprocess with AGENT_TOKEN env var containing narrowed token" │
+│                                                                              │
+│     Agent-specific pattern not addressed by enterprise systems:             │
+│     • Environment-based token injection                                     │
+│     • Automatic delegation on subprocess spawn                              │
+│     • Token refresh across process boundaries                               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.6 Phased Adoption Strategy
+
+#### Phase 1: Simple Implementation (Current)
+
+Build with clean interfaces, simple implementations:
+
+```python
+# Configuration-driven service selection
+def create_broker(config: BrokerConfig) -> Broker:
+    return Broker(
+        token_service=SimpleTokenService(config.signing_secret),
+        policy_service=SimplePolicyService(),
+        credential_service=SimpleCredentialService(config.providers),
+        identity_service=SimpleIdentityService(),
+        sync_service=SimpleSyncService(config.leader_url) if config.leader_url else None,
+        revocation_service=SimpleRevocationService(),
+    )
+```
+
+**Deliverable:** Working system with ~1200 lines, no external dependencies beyond provider SDKs.
+
+#### Phase 2: Enterprise Credential Backend
+
+When you need audit logging, lease management, or more providers:
+
+```python
+# Swap credential service to Vault
+def create_broker(config: BrokerConfig) -> Broker:
+    if config.credential_backend == "vault":
+        credential_service = VaultCredentialService(
+            vault_url=config.vault_url,
+            vault_token=config.vault_token
+        )
+    else:
+        credential_service = SimpleCredentialService(config.providers)
+    
+    return Broker(
+        token_service=SimpleTokenService(config.signing_secret),
+        policy_service=SimplePolicyService(),
+        credential_service=credential_service,  # Swapped
+        # ... rest unchanged
+    )
+```
+
+**Trigger:** Team deployment, audit requirements, >5 providers
+**Effort:** 1-2 days
+
+#### Phase 3: Complex Policy Requirements
+
+When you need dynamic policies, policy testing, or complex authorization logic:
+
+```python
+# Add OPA for policy evaluation
+def create_broker(config: BrokerConfig) -> Broker:
+    if config.policy_backend == "opa":
+        policy_service = OPAPolicyService(config.opa_url)
+    else:
+        policy_service = SimplePolicyService()
+    
+    return Broker(
+        # ... 
+        policy_service=policy_service,  # Swapped
+        # ...
+    )
+```
+
+**Trigger:** Complex policy requirements, need for policy simulation/testing
+**Effort:** 1 day + policy writing
+
+#### Phase 4: Formal Verification / Advanced Tokens
+
+When you need cryptographic proof chains or formal policy verification:
+
+```python
+# Upgrade token format to Biscuit
+def create_broker(config: BrokerConfig) -> Broker:
+    if config.token_format == "biscuit":
+        token_service = BiscuitTokenService(config.biscuit_root_key)
+    elif config.token_format == "ucan":
+        token_service = UCANTokenService(config.did_key)
+    else:
+        token_service = SimpleTokenService(config.signing_secret)
+    
+    return Broker(
+        token_service=token_service,  # Swapped
+        # ...
+    )
+```
+
+**Trigger:** Formal verification requirements, decentralized deployment, third-party caveats
+**Effort:** 2 days
+
+#### Phase 5: Workload Attestation
+
+When you need to verify agent/workload identity cryptographically:
+
+```python
+# Add SPIFFE identity verification
+def create_broker(config: BrokerConfig) -> Broker:
+    if config.identity_backend == "spiffe":
+        identity_service = SPIFFEIdentityService(config.spire_socket)
+    else:
+        identity_service = SimpleIdentityService()
+    
+    return Broker(
+        # ...
+        identity_service=identity_service,  # Swapped
+        # ...
+    )
+```
+
+**Trigger:** Zero-trust requirements, need to verify where agents are running
+**Effort:** 1 day + SPIRE deployment
+
+### 11.7 Hybrid Configurations
+
+For gradual migration, components can be mixed:
+
+```python
+# Example: Vault for credentials, OPA for complex policies, simple tokens
+broker = Broker(
+    token_service=SimpleTokenService(secret),           # Simple HMAC tokens
+    policy_service=HybridPolicyService(                 # Simple + OPA fallback
+        simple=SimplePolicyService(),
+        opa=OPAPolicyService(opa_url),
+        use_opa_for=["complex:*"]                       # Only some scopes use OPA
+    ),
+    credential_service=VaultCredentialService(vault),   # Vault for credentials
+    identity_service=SimpleIdentityService(),           # Simple string IDs
+    revocation_service=SimpleRevocationService(),       # Simple list
+)
+```
+
+**Hybrid Policy Example:**
+
+```python
+class HybridPolicyService(PolicyService):
+    """Use simple matching for basic cases, OPA for complex ones."""
+    
+    def __init__(
+        self,
+        simple: SimplePolicyService,
+        opa: OPAPolicyService,
+        use_opa_for: list[str]
+    ):
+        self.simple = simple
+        self.opa = opa
+        self.opa_patterns = use_opa_for
+    
+    def check(self, token: Token, action: str, resource: str, context: dict = None) -> PolicyDecision:
+        # Determine which service to use
+        use_opa = any(
+            fnmatch.fnmatch(action, pattern) 
+            for pattern in self.opa_patterns
+        )
+        
+        if use_opa and self.opa.is_available():
+            return self.opa.check(token, action, resource, context)
+        else:
+            return self.simple.check(token, action, resource, context)
+```
+
+### 11.8 Lock-in Assessment Summary
+
+| Concern | Risk Level | Mitigation |
+|---------|------------|------------|
+| Token format lock-in | **Low** | Clean TokenService interface, format field in tokens |
+| Policy logic lock-in | **Low** | PolicyService interface, simple default always available |
+| Credential backend lock-in | **Low** | CredentialService interface, provider adapter pattern |
+| Sync protocol lock-in | **Medium** | More integrated, but can swap SyncService implementation |
+| Core orchestration lock-in | **Owned** | This is our value-add (delegation, degradation, agent UX) |
+
+**Bottom line:** The architecture is designed for component-level replacement. The main "lock-in" is to our orchestration logic, which is also where our unique value lies.
+
+---
+
+## 12. Appendices
+
+### 12.1 Appendix A: Comparison with Alternatives
 
 | Feature | This System | Vault | Infisical | Akeyless |
 |---------|-------------|-------|-----------|----------|
@@ -2077,7 +2903,7 @@ WebSocket /ws
 | **Self-hosted** | ✓ | ✓ | ✓ | ✗ |
 | **Enterprise features** | ✗ | ✓ | ✓ | ✓ |
 
-### Appendix B: Scope Reference
+### 12.2 Appendix B: Scope Reference
 
 ```
 # GitHub
@@ -2107,7 +2933,7 @@ aws:*:*                   # All (within role)
 system:token:refresh      # Self-refresh capability
 ```
 
-### Appendix C: Example Configurations
+### 12.3 Appendix C: Example Configurations
 
 **Standalone (`~/.agent-credentials/config.json`):**
 ```json
@@ -2140,7 +2966,7 @@ system:token:refresh      # Self-refresh capability
 }
 ```
 
-### Appendix D: Token Examples
+### 12.4 Appendix D: Token Examples
 
 **Standalone token:**
 ```json
@@ -2174,7 +3000,7 @@ system:token:refresh      # Self-refresh capability
 }
 ```
 
-### Appendix E: Degradation Behavior Matrix
+### 12.5 Appendix E: Degradation Behavior Matrix
 
 | Operation | Connected | Degraded | Limited | Offline | Standalone |
 |-----------|-----------|----------|---------|---------|------------|
@@ -2193,6 +3019,7 @@ system:token:refresh      # Self-refresh capability
 |---------|------|---------|
 | 1.0 | 2025-02 | Initial draft - standalone mode |
 | 1.1 | 2025-02 | Added distributed extension (Section 8) |
+| 1.2 | 2025-02 | Added extensibility & migration paths (Section 11) |
 
 ---
 
@@ -2208,3 +3035,10 @@ system:token:refresh      # Self-refresh capability
 | **Degraded** | Follower operating with stale cache |
 | **Attenuation** | Narrowing of capabilities during delegation |
 | **Capability token** | Signed token specifying allowed operations |
+| **Adapter seam** | Interface boundary allowing component replacement |
+| **Service protocol** | Abstract interface defining component contract |
+| **Biscuit** | Datalog-based capability token format with formal verification |
+| **UCAN** | User Controlled Authorization Networks - JWT-based capability tokens |
+| **OPA** | Open Policy Agent - general-purpose policy engine |
+| **SPIFFE** | Secure Production Identity Framework for Everyone - workload identity standard |
+| **Zanzibar** | Google's relationship-based access control system |
