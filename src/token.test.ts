@@ -858,3 +858,629 @@ describe("generateSecret", () => {
     assert.strictEqual(secrets.size, 100);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// MAP INTEGRATION - IDENTITY BINDING TESTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("TokenService - Identity Binding (MAP Integration)", () => {
+  test("creates root token with identity binding", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "identity-test",
+      scopes: ["github:repo:read"],
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+        principalType: "human",
+        tenantId: "acme-corp",
+      },
+    });
+
+    assert.ok(token.identity);
+    assert.strictEqual(token.identity.systemId, "map-system-alpha");
+    assert.strictEqual(token.identity.principalId, "user@example.com");
+    assert.strictEqual(token.identity.principalType, "human");
+    assert.strictEqual(token.identity.tenantId, "acme-corp");
+
+    // Token should still verify
+    assert.strictEqual(service.verify(token).valid, true);
+  });
+
+  test("identity binding is cryptographically protected", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "identity-test",
+      scopes: ["github:repo:read"],
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+      },
+    });
+
+    // Tamper with identity
+    const tampered = {
+      ...token,
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "attacker@evil.com",
+      },
+    };
+
+    const result = service.verify(tampered);
+    assert.strictEqual(result.valid, false);
+    assert.strictEqual(result.error, "Invalid signature");
+  });
+
+  test("delegation inherits identity by default", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+        principalType: "human",
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+    });
+
+    // Identity should be inherited
+    assert.ok(child.identity);
+    assert.strictEqual(child.identity.systemId, "map-system-alpha");
+    assert.strictEqual(child.identity.principalId, "user@example.com");
+    assert.strictEqual(child.identity.principalType, "human");
+  });
+
+  test("delegation can opt out of identity inheritance", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      inheritIdentity: false,
+    });
+
+    // Identity should be cleared
+    assert.strictEqual(child.identity, undefined);
+  });
+
+  test("token without identity works standalone", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "standalone",
+      scopes: ["github:repo:read"],
+      // No identity - standalone mode
+    });
+
+    assert.strictEqual(token.identity, undefined);
+    assert.strictEqual(service.verify(token).valid, true);
+  });
+
+  test("identity with external auth info", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "external-auth",
+      scopes: ["github:repo:read"],
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+        externalAuth: {
+          issuer: "https://auth.example.com",
+          subject: "oauth-user-123",
+          authenticatedAt: new Date().toISOString(),
+          claims: { email: "user@example.com", groups: ["developers"] },
+        },
+      },
+    });
+
+    assert.ok(token.identity?.externalAuth);
+    assert.strictEqual(token.identity.externalAuth.issuer, "https://auth.example.com");
+    assert.strictEqual(token.identity.externalAuth.subject, "oauth-user-123");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// MAP INTEGRATION - FEDERATION METADATA TESTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("TokenService - Federation Metadata (MAP Integration)", () => {
+  test("creates root token with federation metadata", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "federation-test",
+      scopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: true,
+        allowedSystems: ["system-beta", "system-gamma"],
+        originSystem: "map-system-alpha",
+        maxHops: 3,
+      },
+    });
+
+    assert.ok(token.federation);
+    assert.strictEqual(token.federation.crossSystemAllowed, true);
+    assert.deepStrictEqual(token.federation.allowedSystems, ["system-beta", "system-gamma"]);
+    assert.strictEqual(token.federation.originSystem, "map-system-alpha");
+    assert.strictEqual(token.federation.maxHops, 3);
+  });
+
+  test("federation metadata is cryptographically protected", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "federation-test",
+      scopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: false,
+        maxHops: 1,
+      },
+    });
+
+    // Tamper with federation
+    const tampered = {
+      ...token,
+      federation: {
+        ...token.federation,
+        crossSystemAllowed: true,
+        maxHops: 10,
+      },
+    };
+
+    assert.strictEqual(service.verify(tampered).valid, false);
+  });
+
+  test("delegation attenuates federation - cannot enable crossSystem", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: false,
+        maxHops: 3,
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: true, // Trying to enable - should fail
+      },
+    });
+
+    // Should still be false (attenuated)
+    assert.strictEqual(child.federation?.crossSystemAllowed, false);
+  });
+
+  test("delegation attenuates federation - uses smaller maxHops", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: true,
+        maxHops: 5,
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      federation: {
+        maxHops: 2, // More restrictive
+      },
+    });
+
+    assert.strictEqual(child.federation?.maxHops, 2);
+  });
+
+  test("delegation preserves originSystem", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: true,
+        originSystem: "original-system",
+        maxHops: 3,
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+    });
+
+    assert.strictEqual(child.federation?.originSystem, "original-system");
+  });
+
+  test("child can add federation to parent without federation", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      // No federation
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      federation: {
+        crossSystemAllowed: true,
+        maxHops: 2,
+      },
+    });
+
+    assert.ok(child.federation);
+    assert.strictEqual(child.federation.crossSystemAllowed, true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// MAP INTEGRATION - AGENT CAPABILITIES TESTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("TokenService - Agent Capabilities (MAP Integration)", () => {
+  test("creates root token with agent capabilities", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "capabilities-test",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: true,
+        canFederate: true,
+        canMessage: true,
+        canReceive: true,
+        visibility: "public",
+      },
+    });
+
+    assert.ok(token.agentCapabilities);
+    assert.strictEqual(token.agentCapabilities.canSpawn, true);
+    assert.strictEqual(token.agentCapabilities.canFederate, true);
+    assert.strictEqual(token.agentCapabilities.visibility, "public");
+  });
+
+  test("capabilities are cryptographically protected", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "capabilities-test",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: false,
+        canFederate: false,
+      },
+    });
+
+    // Tamper with capabilities
+    const tampered = {
+      ...token,
+      agentCapabilities: {
+        canSpawn: true,
+        canFederate: true,
+      },
+    };
+
+    assert.strictEqual(service.verify(tampered).valid, false);
+  });
+
+  test("delegation attenuates boolean capabilities", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: true,
+        canFederate: true,
+        canMessage: true,
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: false, // Disable spawning
+        canFederate: true, // Keep federation
+        // canMessage not specified - inherits
+      },
+    });
+
+    assert.strictEqual(child.agentCapabilities?.canSpawn, false);
+    assert.strictEqual(child.agentCapabilities?.canFederate, true);
+    assert.strictEqual(child.agentCapabilities?.canMessage, true);
+  });
+
+  test("delegation cannot enable capability disabled by parent", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: false,
+        canFederate: false,
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: true, // Trying to enable - should fail
+        canFederate: true,
+      },
+    });
+
+    // Should still be false (attenuated)
+    assert.strictEqual(child.agentCapabilities?.canSpawn, false);
+    assert.strictEqual(child.agentCapabilities?.canFederate, false);
+  });
+
+  test("delegation attenuates visibility to more restrictive", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        visibility: "public",
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      agentCapabilities: {
+        visibility: "parent-only", // More restrictive
+      },
+    });
+
+    assert.strictEqual(child.agentCapabilities?.visibility, "parent-only");
+  });
+
+  test("delegation cannot widen visibility", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        visibility: "parent-only",
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      agentCapabilities: {
+        visibility: "public", // Trying to widen - should fail
+      },
+    });
+
+    // Should use parent's more restrictive visibility
+    assert.strictEqual(child.agentCapabilities?.visibility, "parent-only");
+  });
+
+  test("custom capabilities are attenuated", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const parent = service.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      agentCapabilities: {
+        custom: {
+          canAccessInternal: true,
+          canModifyConfig: false,
+        },
+      },
+    });
+
+    const child = service.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      agentCapabilities: {
+        custom: {
+          canAccessInternal: false, // Disable
+          canModifyConfig: true, // Try to enable - should fail
+        },
+      },
+    });
+
+    assert.strictEqual(child.agentCapabilities?.custom?.canAccessInternal, false);
+    assert.strictEqual(child.agentCapabilities?.custom?.canModifyConfig, false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// MAP INTEGRATION - COMBINED SCENARIOS
+// ─────────────────────────────────────────────────────────────────
+
+describe("TokenService - Combined MAP Integration", () => {
+  test("full token with identity, federation, and capabilities", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const token = service.createRootToken({
+      agentId: "full-map-token",
+      scopes: ["github:repo:read", "aws:s3:write"],
+      constraints: {
+        "github:repo:read": { resources: ["myorg/*"] },
+      },
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+        principalType: "human",
+        tenantId: "acme-corp",
+      },
+      federation: {
+        crossSystemAllowed: true,
+        allowedSystems: ["system-beta"],
+        originSystem: "map-system-alpha",
+        maxHops: 3,
+      },
+      agentCapabilities: {
+        canSpawn: true,
+        canFederate: true,
+        canMessage: true,
+        visibility: "public",
+      },
+    });
+
+    // All fields present
+    assert.ok(token.identity);
+    assert.ok(token.federation);
+    assert.ok(token.agentCapabilities);
+
+    // Token verifies
+    assert.strictEqual(service.verify(token).valid, true);
+
+    // Serialization roundtrip preserves all fields
+    const serialized = service.serialize(token);
+    const deserialized = service.deserialize(serialized);
+
+    assert.deepStrictEqual(deserialized.identity, token.identity);
+    assert.deepStrictEqual(deserialized.federation, token.federation);
+    assert.deepStrictEqual(deserialized.agentCapabilities, token.agentCapabilities);
+  });
+
+  test("deep delegation chain preserves and attenuates all fields", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const root = service.createRootToken({
+      agentId: "root",
+      scopes: ["github:*"],
+      maxDelegationDepth: 5,
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "admin@example.com",
+        principalType: "human",
+      },
+      federation: {
+        crossSystemAllowed: true,
+        originSystem: "map-system-alpha",
+        maxHops: 5,
+      },
+      agentCapabilities: {
+        canSpawn: true,
+        canFederate: true,
+        canMessage: true,
+        visibility: "public",
+      },
+    });
+
+    const level1 = service.delegate(root, {
+      agentId: "coordinator",
+      requestedScopes: ["github:repo:*"],
+      agentCapabilities: {
+        visibility: "scope", // More restrictive
+      },
+    });
+
+    const level2 = service.delegate(level1, {
+      agentId: "worker",
+      requestedScopes: ["github:repo:read"],
+      agentCapabilities: {
+        canSpawn: false, // Disable spawning
+      },
+      federation: {
+        maxHops: 2, // More restrictive
+      },
+    });
+
+    // Level 1 checks
+    assert.strictEqual(level1.identity?.principalId, "admin@example.com");
+    assert.strictEqual(level1.agentCapabilities?.visibility, "scope");
+    assert.strictEqual(level1.agentCapabilities?.canSpawn, true);
+
+    // Level 2 checks
+    assert.strictEqual(level2.identity?.principalId, "admin@example.com"); // Inherited
+    assert.strictEqual(level2.agentCapabilities?.visibility, "scope"); // Inherited
+    assert.strictEqual(level2.agentCapabilities?.canSpawn, false); // Attenuated
+    assert.strictEqual(level2.federation?.maxHops, 2); // Attenuated
+    assert.strictEqual(level2.federation?.originSystem, "map-system-alpha"); // Preserved
+  });
+
+  test("refreshed token preserves MAP integration fields", () => {
+    const secret = generateSecret();
+    const service = new TokenService(secret);
+
+    const original = service.createRootToken({
+      agentId: "refresh-test",
+      scopes: ["github:repo:read"],
+      ttlDays: 1,
+      identity: {
+        systemId: "map-system-alpha",
+        principalId: "user@example.com",
+      },
+      federation: {
+        crossSystemAllowed: true,
+        maxHops: 3,
+      },
+      agentCapabilities: {
+        canSpawn: true,
+      },
+    });
+
+    const newExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const refreshed = service.createRefreshedToken(original, newExpiry);
+
+    // All MAP fields preserved
+    assert.deepStrictEqual(refreshed.identity, original.identity);
+    assert.deepStrictEqual(refreshed.federation, original.federation);
+    assert.deepStrictEqual(refreshed.agentCapabilities, original.agentCapabilities);
+
+    // New expiry applied
+    assert.strictEqual(refreshed.expiresAt, newExpiry);
+
+    // Token verifies
+    assert.strictEqual(service.verify(refreshed).valid, true);
+  });
+});

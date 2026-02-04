@@ -10,6 +10,10 @@ import type {
   SerializedToken,
   Constraints,
   ScopeConstraint,
+  CreateRootTokenParams,
+  IdentityBinding,
+  FederationMetadata,
+  AgentCapabilities,
 } from "./types.js";
 
 /** Sign a token using HMAC-SHA256 */
@@ -75,14 +79,7 @@ export class TokenService {
   }
 
   /** Create a root token */
-  createRootToken(params: {
-    agentId: string;
-    scopes: string[];
-    constraints?: Constraints;
-    delegatable?: boolean;
-    maxDelegationDepth?: number;
-    ttlDays?: number;
-  }): AgentToken {
+  createRootToken(params: CreateRootTokenParams): AgentToken {
     const now = new Date();
     const expiresAt = params.ttlDays
       ? new Date(now.getTime() + params.ttlDays * 24 * 60 * 60 * 1000).toISOString()
@@ -97,6 +94,10 @@ export class TokenService {
       currentDepth: 0,
       expiresAt,
       maxExpiresAt: expiresAt,
+      // Optional MAP integration fields (ignored in standalone mode)
+      ...(params.identity && { identity: params.identity }),
+      ...(params.federation && { federation: params.federation }),
+      ...(params.agentCapabilities && { agentCapabilities: params.agentCapabilities }),
     };
 
     const signature = sign(token, this.secret);
@@ -147,6 +148,19 @@ export class TokenService {
       }
     }
 
+    // Handle identity inheritance (default: inherit from parent)
+    const inheritIdentity = request.inheritIdentity ?? true;
+    const childIdentity = inheritIdentity ? parent.identity : undefined;
+
+    // Handle federation (attenuate: can only be equal or more restrictive)
+    const childFederation = this.mergeFederation(parent.federation, request.federation);
+
+    // Handle agent capabilities (attenuate: can only be equal or more restrictive)
+    const childCapabilities = this.mergeAgentCapabilities(
+      parent.agentCapabilities,
+      request.agentCapabilities
+    );
+
     const child: Omit<AgentToken, "signature"> = {
       agentId: request.agentId ?? `agent-${crypto.randomBytes(4).toString("hex")}`,
       parentId: parent.agentId,
@@ -157,6 +171,10 @@ export class TokenService {
       currentDepth: parent.currentDepth + 1,
       expiresAt,
       maxExpiresAt: parent.maxExpiresAt,
+      // Optional MAP integration fields (inherited/attenuated)
+      ...(childIdentity && { identity: childIdentity }),
+      ...(childFederation && { federation: childFederation }),
+      ...(childCapabilities && { agentCapabilities: childCapabilities }),
     };
 
     const signature = sign(child, this.secret);
@@ -265,6 +283,10 @@ export class TokenService {
       currentDepth: token.currentDepth,
       expiresAt: newExpiresAt,
       maxExpiresAt: token.maxExpiresAt,
+      // Preserve optional MAP integration fields
+      ...(token.identity && { identity: token.identity }),
+      ...(token.federation && { federation: token.federation }),
+      ...(token.agentCapabilities && { agentCapabilities: token.agentCapabilities }),
     };
 
     const signature = sign(refreshed, this.secret);
@@ -356,6 +378,129 @@ export class TokenService {
     }
 
     return result;
+  }
+
+  // ==========================================================================
+  // MAP Integration: Federation and Capabilities Merging
+  // ==========================================================================
+
+  /**
+   * Merge federation metadata (child can only be equal or more restrictive)
+   * Returns undefined if neither parent nor request has federation
+   */
+  private mergeFederation(
+    parent?: FederationMetadata,
+    request?: Partial<FederationMetadata>
+  ): FederationMetadata | undefined {
+    // If no federation context, return undefined
+    if (!parent && !request) {
+      return undefined;
+    }
+
+    // If parent has no federation but request does, start fresh
+    if (!parent && request) {
+      return {
+        crossSystemAllowed: request.crossSystemAllowed ?? false,
+        allowedSystems: request.allowedSystems,
+        originSystem: request.originSystem,
+        hopCount: request.hopCount ?? 0,
+        maxHops: request.maxHops ?? 3,
+        allowFurtherFederation: request.allowFurtherFederation ?? true,
+      };
+    }
+
+    // If parent has federation, attenuate
+    const parentFed = parent!;
+    return {
+      // Can only disable, not enable
+      crossSystemAllowed: (request?.crossSystemAllowed ?? true) && parentFed.crossSystemAllowed,
+      // Use more restrictive allowedSystems (intersection or child's if specified)
+      allowedSystems: request?.allowedSystems ?? parentFed.allowedSystems,
+      // Preserve origin
+      originSystem: parentFed.originSystem,
+      // Inherit hop count
+      hopCount: parentFed.hopCount,
+      // Use smaller maxHops
+      maxHops: Math.min(request?.maxHops ?? Infinity, parentFed.maxHops ?? Infinity),
+      // Can only disable, not enable
+      allowFurtherFederation:
+        (request?.allowFurtherFederation ?? true) &&
+        (parentFed.allowFurtherFederation ?? true),
+    };
+  }
+
+  /**
+   * Merge agent capabilities (child can only be equal or more restrictive)
+   * Returns undefined if neither parent nor request has capabilities
+   */
+  private mergeAgentCapabilities(
+    parent?: AgentCapabilities,
+    request?: AgentCapabilities
+  ): AgentCapabilities | undefined {
+    // If no capabilities context, return undefined
+    if (!parent && !request) {
+      return undefined;
+    }
+
+    // If parent has no capabilities but request does, use request
+    if (!parent && request) {
+      return { ...request };
+    }
+
+    // If parent has capabilities, attenuate (can only disable, not enable)
+    const parentCaps = parent!;
+    const result: AgentCapabilities = {};
+
+    // Boolean capabilities: child can only be equal or false (more restrictive)
+    // Handle each boolean capability explicitly for type safety
+    const mergeBoolCap = (
+      parent: boolean | undefined,
+      request: boolean | undefined
+    ): boolean | undefined => {
+      if (parent !== undefined) {
+        return (request ?? true) && parent;
+      }
+      return request;
+    };
+
+    result.canSpawn = mergeBoolCap(parentCaps.canSpawn, request?.canSpawn);
+    result.canFederate = mergeBoolCap(parentCaps.canFederate, request?.canFederate);
+    result.canCreateScopes = mergeBoolCap(parentCaps.canCreateScopes, request?.canCreateScopes);
+    result.canMessage = mergeBoolCap(parentCaps.canMessage, request?.canMessage);
+    result.canReceive = mergeBoolCap(parentCaps.canReceive, request?.canReceive);
+    result.canObserve = mergeBoolCap(parentCaps.canObserve, request?.canObserve);
+
+    // Visibility: use more restrictive
+    // Order: public > scope > parent-only > system (system is most restrictive)
+    const visibilityOrder = ["public", "scope", "parent-only", "system"];
+    if (parentCaps.visibility || request?.visibility) {
+      const parentIdx = visibilityOrder.indexOf(parentCaps.visibility ?? "public");
+      const requestIdx = visibilityOrder.indexOf(request?.visibility ?? "public");
+      result.visibility = visibilityOrder[Math.max(parentIdx, requestIdx)] as AgentCapabilities["visibility"];
+    }
+
+    // Custom capabilities: merge with attenuation
+    if (parentCaps.custom || request?.custom) {
+      result.custom = {};
+      const allKeys = new Set([
+        ...Object.keys(parentCaps.custom ?? {}),
+        ...Object.keys(request?.custom ?? {}),
+      ]);
+      for (const key of allKeys) {
+        const parentVal = parentCaps.custom?.[key];
+        const requestVal = request?.custom?.[key];
+        // Same attenuation logic: true only if both allow
+        if (parentVal !== undefined && requestVal !== undefined) {
+          result.custom[key] = parentVal && requestVal;
+        } else {
+          result.custom[key] = parentVal ?? requestVal ?? false;
+        }
+      }
+    }
+
+    // Return undefined if result is empty
+    const hasAnyValue = Object.values(result).some((v) => v !== undefined);
+    return hasAnyValue ? result : undefined;
   }
 }
 

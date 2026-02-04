@@ -60,4 +60,11 @@ export type {
   APIKeyProviderConfig,
   BrokerConfig,
   SerializedToken,
+  // MAP integration types
+  CreateRootTokenParams,
+  IdentityBinding,
+  ExternalAuthInfo,
+  FederatedIdentity,
+  FederationMetadata,
+  AgentCapabilities,
 } from "./types.js";
