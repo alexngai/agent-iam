@@ -352,6 +352,174 @@ interface CredentialResult {
 }
 ```
 
+## MAP Protocol Integration
+
+Agent-IAM is designed to work standalone or as an IAM provider for the [Multi-Agent Protocol (MAP)](https://github.com/multi-agent-protocol/multi-agent-protocol). The token format includes optional fields for identity binding, federation, and agent-level capabilities that integrate seamlessly with MAP.
+
+### Identity Binding
+
+Link tokens to external identity contexts for audit trails and cross-system traceability:
+
+```typescript
+const token = broker.createRootToken({
+  agentId: "coordinator",
+  scopes: ["github:repo:*"],
+  identity: {
+    systemId: "map-system-alpha",          // MAP system identifier
+    principalId: "user@example.com",       // Human/service responsible
+    principalType: "human",                // "human" | "service" | "agent"
+    tenantId: "acme-corp",                 // Multi-tenant isolation
+    externalAuth: {                        // External IdP proof (optional)
+      issuer: "https://auth.example.com",
+      subject: "oauth-user-123",
+      authenticatedAt: new Date().toISOString(),
+    },
+  },
+  ttlDays: 7,
+});
+
+// Identity is inherited through delegation chain
+const childToken = broker.delegate(token, {
+  agentId: "worker",
+  requestedScopes: ["github:repo:read"],
+});
+// childToken.identity.principalId === "user@example.com"
+
+// Or opt out of inheritance for anonymized delegation
+const anonToken = broker.delegate(token, {
+  agentId: "anonymous-worker",
+  requestedScopes: ["github:repo:read"],
+  inheritIdentity: false,
+});
+```
+
+### Federation Metadata
+
+Control cross-system token usage for MAP federation:
+
+```typescript
+const token = broker.createRootToken({
+  agentId: "coordinator",
+  scopes: ["github:repo:*"],
+  federation: {
+    crossSystemAllowed: true,              // Can be used across MAP systems
+    allowedSystems: ["system-beta"],       // Specific systems allowed
+    originSystem: "map-system-alpha",      // Original issuing system
+    maxHops: 3,                            // Prevent routing loops
+    allowFurtherFederation: true,          // Can delegate federated tokens
+  },
+  ttlDays: 7,
+});
+
+// Delegation attenuates federation (can only restrict, never widen)
+const childToken = broker.delegate(token, {
+  agentId: "worker",
+  requestedScopes: ["github:repo:read"],
+  federation: {
+    crossSystemAllowed: false,  // Disable cross-system for this child
+    maxHops: 1,                 // More restrictive than parent
+  },
+});
+```
+
+### Agent Capabilities
+
+Define what agents can do within the MAP system (separate from resource access scopes):
+
+```typescript
+const token = broker.createRootToken({
+  agentId: "coordinator",
+  scopes: ["github:repo:*"],
+  agentCapabilities: {
+    canSpawn: true,                        // Can create child agents
+    canFederate: true,                     // Can participate in federation
+    canCreateScopes: true,                 // Can create MAP scopes
+    canMessage: true,                      // Can send messages
+    canReceive: true,                      // Can receive messages
+    canObserve: true,                      // Can observe system events
+    visibility: "public",                  // "public" | "scope" | "parent-only" | "system"
+    custom: {                              // Extensible capabilities
+      canAccessInternalAPIs: true,
+    },
+  },
+  ttlDays: 7,
+});
+
+// Capabilities attenuate through delegation (can only disable, never enable)
+const childToken = broker.delegate(token, {
+  agentId: "worker",
+  requestedScopes: ["github:repo:read"],
+  agentCapabilities: {
+    canSpawn: false,            // Disable spawning for worker
+    visibility: "parent-only",  // More restrictive visibility
+  },
+});
+// childToken.agentCapabilities.canSpawn === false
+// childToken.agentCapabilities.canMessage === true (inherited)
+```
+
+### MAP Integration Types
+
+```typescript
+interface IdentityBinding {
+  systemId: string;
+  principalId?: string;
+  principalType?: "human" | "service" | "agent";
+  tenantId?: string;
+  organizationId?: string;
+  externalAuth?: ExternalAuthInfo;
+  federatedFrom?: FederatedIdentity;
+}
+
+interface FederationMetadata {
+  crossSystemAllowed: boolean;
+  allowedSystems?: string[];
+  originSystem?: string;
+  hopCount?: number;
+  maxHops?: number;
+  allowFurtherFederation?: boolean;
+}
+
+interface AgentCapabilities {
+  canSpawn?: boolean;
+  canFederate?: boolean;
+  canCreateScopes?: boolean;
+  visibility?: "public" | "parent-only" | "scope" | "system";
+  canMessage?: boolean;
+  canReceive?: boolean;
+  canObserve?: boolean;
+  custom?: Record<string, boolean>;
+}
+```
+
+### Standalone vs MAP Mode
+
+All MAP integration fields are **optional**. When not provided, agent-iam works as a standalone capability broker:
+
+```typescript
+// Standalone mode (no MAP fields)
+const standaloneToken = broker.createRootToken({
+  agentId: "standalone-agent",
+  scopes: ["github:repo:read"],
+  ttlDays: 1,
+});
+// token.identity === undefined
+// token.federation === undefined
+// token.agentCapabilities === undefined
+
+// MAP mode (with integration fields)
+const mapToken = broker.createRootToken({
+  agentId: "map-agent",
+  scopes: ["github:repo:read"],
+  identity: { systemId: "alpha", principalId: "user@corp.com" },
+  federation: { crossSystemAllowed: true, maxHops: 3 },
+  agentCapabilities: { canSpawn: true, visibility: "public" },
+  ttlDays: 1,
+});
+```
+
+All fields are cryptographically protected by the HMAC signature - any tampering invalidates the token.
+
 ## Development
 
 ```bash
