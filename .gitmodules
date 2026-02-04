@@ -1,3 +1,0 @@
-[submodule "map-protocol"]
-	path = map-protocol
-	url = https://github.com/multi-agent-protocol/multi-agent-protocol.git
