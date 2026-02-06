@@ -154,7 +154,7 @@ export class SigningKeyManager {
     let pruned = 0;
     for (const [version, versionedKey] of this.keys) {
       if (version === this.currentVersion) continue;
-      if (versionedKey.createdAt >= cutoffStr) continue;
+      if (versionedKey.createdAt > cutoffStr) continue;
 
       this.keys.delete(version);
       pruned++;
