@@ -9,6 +9,7 @@ import * as path from "path";
 import * as os from "os";
 import { Broker } from "./broker.js";
 import { APIKeyProvider, APIKeyProviderFactory } from "./providers/apikey.js";
+import { SlackProvider } from "./providers/slack.js";
 
 // Create a unique temp directory for each test
 function createTempDir(): string {
@@ -457,5 +458,403 @@ describe("Broker - Credential Retrieval with API Keys", () => {
       },
       { message: /not supported/ }
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// SLACK PROVIDER TESTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("SlackProvider", () => {
+  describe("Bot Mode - Credential Issuance", () => {
+    test("issues bot token credential", async () => {
+      const provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-bot-token-12345",
+        teamId: "T12345",
+      });
+
+      const cred = await provider.issueCredential("slack:chat:write", "#general");
+
+      assert.strictEqual(cred.credentialType, "bearer_token");
+      assert.strictEqual(cred.credential.token, "xoxb-test-bot-token-12345");
+      assert.strictEqual(cred.credential.tokenType, "bearer");
+      assert.strictEqual(cred.credential.mode, "bot");
+      assert.strictEqual(cred.credential.teamId, "T12345");
+      assert.ok(cred.expiresAt);
+      assert.ok(Array.isArray(cred.credential.scopes));
+      assert.ok((cred.credential.scopes as string[]).includes("chat:write"));
+    });
+
+    test("maps chat:read scope to history scopes", async () => {
+      const provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-token",
+      });
+
+      const cred = await provider.issueCredential("slack:chat:read", "");
+
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("channels:history"));
+      assert.ok(scopes.includes("groups:history"));
+      assert.ok(scopes.includes("im:history"));
+    });
+
+    test("maps channels:read scope correctly", async () => {
+      const provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-token",
+      });
+
+      const cred = await provider.issueCredential("slack:channels:read", "");
+
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("channels:read"));
+      assert.ok(scopes.includes("groups:read"));
+    });
+
+    test("maps wildcard chat scope", async () => {
+      const provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-token",
+      });
+
+      const cred = await provider.issueCredential("slack:chat:*", "");
+
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("chat:write"));
+      assert.ok(scopes.includes("channels:history"));
+    });
+
+    test("maps wildcard slack scope", async () => {
+      const provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-token",
+      });
+
+      const cred = await provider.issueCredential("slack:*", "");
+
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("chat:write"));
+      assert.ok(scopes.includes("channels:read"));
+      assert.ok(scopes.includes("users:read"));
+    });
+
+    test("returns empty scopes for unknown scope", async () => {
+      const provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-token",
+      });
+
+      const cred = await provider.issueCredential("slack:unknown:scope", "");
+
+      const scopes = cred.credential.scopes as string[];
+      assert.strictEqual(scopes.length, 0);
+    });
+  });
+
+  describe("User Mode - Credential Issuance", () => {
+    test("issues user token credential (no refresh)", async () => {
+      const provider = new SlackProvider({
+        mode: "user",
+        token: "xoxp-test-user-token-12345",
+        teamId: "T12345",
+      });
+
+      const cred = await provider.issueCredential("slack:chat:write", "#general");
+
+      assert.strictEqual(cred.credentialType, "bearer_token");
+      assert.strictEqual(cred.credential.token, "xoxp-test-user-token-12345");
+      assert.strictEqual(cred.credential.mode, "user");
+      assert.strictEqual(cred.credential.teamId, "T12345");
+      assert.ok(cred.expiresAt);
+    });
+  });
+
+  describe("Scope Mapping", () => {
+    let provider: SlackProvider;
+
+    beforeEach(() => {
+      provider = new SlackProvider({
+        mode: "bot",
+        token: "xoxb-test-token",
+      });
+    });
+
+    test("maps files scopes", async () => {
+      const readCred = await provider.issueCredential("slack:files:read", "");
+      assert.ok((readCred.credential.scopes as string[]).includes("files:read"));
+
+      const writeCred = await provider.issueCredential("slack:files:write", "");
+      assert.ok((writeCred.credential.scopes as string[]).includes("files:write"));
+    });
+
+    test("maps reactions scopes", async () => {
+      const readCred = await provider.issueCredential("slack:reactions:read", "");
+      assert.ok((readCred.credential.scopes as string[]).includes("reactions:read"));
+
+      const writeCred = await provider.issueCredential("slack:reactions:write", "");
+      assert.ok((writeCred.credential.scopes as string[]).includes("reactions:write"));
+    });
+
+    test("maps users scopes", async () => {
+      const cred = await provider.issueCredential("slack:users:read", "");
+      assert.ok((cred.credential.scopes as string[]).includes("users:read"));
+    });
+
+    test("maps im scopes", async () => {
+      const readCred = await provider.issueCredential("slack:im:read", "");
+      assert.ok((readCred.credential.scopes as string[]).includes("im:read"));
+
+      const writeCred = await provider.issueCredential("slack:im:write", "");
+      assert.ok((writeCred.credential.scopes as string[]).includes("im:write"));
+    });
+
+    test("maps wildcard files scope", async () => {
+      const cred = await provider.issueCredential("slack:files:*", "");
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("files:read"));
+      assert.ok(scopes.includes("files:write"));
+    });
+
+    test("maps wildcard reactions scope", async () => {
+      const cred = await provider.issueCredential("slack:reactions:*", "");
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("reactions:read"));
+      assert.ok(scopes.includes("reactions:write"));
+    });
+
+    test("maps wildcard channels scope", async () => {
+      const cred = await provider.issueCredential("slack:channels:*", "");
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("channels:read"));
+      assert.ok(scopes.includes("channels:manage"));
+      assert.ok(scopes.includes("channels:join"));
+    });
+
+    test("maps wildcard im scope", async () => {
+      const cred = await provider.issueCredential("slack:im:*", "");
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("im:read"));
+      assert.ok(scopes.includes("im:write"));
+    });
+
+    test("maps wildcard users scope", async () => {
+      const cred = await provider.issueCredential("slack:users:*", "");
+      const scopes = cred.credential.scopes as string[];
+      assert.ok(scopes.includes("users:read"));
+      assert.ok(scopes.includes("users:read.email"));
+    });
+
+    test("maps pins scopes", async () => {
+      const readCred = await provider.issueCredential("slack:pins:read", "");
+      assert.ok((readCred.credential.scopes as string[]).includes("pins:read"));
+
+      const writeCred = await provider.issueCredential("slack:pins:write", "");
+      assert.ok((writeCred.credential.scopes as string[]).includes("pins:write"));
+    });
+  });
+});
+
+describe("Broker - Slack Provider Initialization", () => {
+  let tempDir: string;
+  let broker: Broker;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    broker = new Broker(tempDir);
+  });
+
+  afterEach(() => {
+    cleanupTempDir(tempDir);
+  });
+
+  test("initializes Slack bot provider", () => {
+    broker.initProvider("slack", {
+      mode: "bot",
+      token: "xoxb-test-bot-token",
+      teamId: "T12345",
+    });
+
+    const status = broker.getStatus();
+    assert.ok(status.providers.includes("slack"));
+  });
+
+  test("initializes Slack user provider", () => {
+    broker.initProvider("slack", {
+      mode: "user",
+      token: "xoxp-test-user-token",
+      clientId: "client-id-123",
+      clientSecret: "client-secret-456",
+      refreshToken: "xoxe-1-refresh-token",
+      teamId: "T12345",
+    });
+
+    const status = broker.getStatus();
+    assert.ok(status.providers.includes("slack"));
+  });
+
+  test("shows Slack config with redacted secrets", () => {
+    broker.initProvider("slack", {
+      mode: "bot",
+      token: "xoxb-super-secret-token",
+      teamId: "T12345",
+    });
+
+    const config = broker.showConfig();
+    const providers = config.providers as Record<string, Record<string, string>>;
+
+    assert.strictEqual(providers.slack.mode, "bot");
+    assert.strictEqual(providers.slack.token, "***REDACTED***");
+    assert.strictEqual(providers.slack.teamId, "T12345");
+  });
+
+  test("shows Slack user config with all secrets redacted", () => {
+    broker.initProvider("slack", {
+      mode: "user",
+      token: "xoxp-secret-user-token",
+      clientId: "client-id",
+      clientSecret: "secret-client-secret",
+      refreshToken: "secret-refresh-token",
+    });
+
+    const config = broker.showConfig();
+    const providers = config.providers as Record<string, Record<string, string>>;
+
+    assert.strictEqual(providers.slack.mode, "user");
+    assert.strictEqual(providers.slack.token, "***REDACTED***");
+    assert.strictEqual(providers.slack.clientSecret, "***REDACTED***");
+    assert.strictEqual(providers.slack.refreshToken, "***REDACTED***");
+    assert.strictEqual(providers.slack.clientId, "client-id");
+  });
+
+  test("Slack config persists across broker instances", () => {
+    broker.initProvider("slack", {
+      mode: "bot",
+      token: "xoxb-persistent-token",
+      teamId: "T99999",
+    });
+
+    const broker2 = new Broker(tempDir);
+    const status = broker2.getStatus();
+    assert.ok(status.providers.includes("slack"));
+  });
+});
+
+describe("Broker - Slack Credential Retrieval", () => {
+  let tempDir: string;
+  let broker: Broker;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    broker = new Broker(tempDir);
+
+    // Configure Slack bot provider
+    broker.initProvider("slack", {
+      mode: "bot",
+      token: "xoxb-test-credential-token",
+      teamId: "T12345",
+    });
+  });
+
+  afterEach(() => {
+    cleanupTempDir(tempDir);
+  });
+
+  test("gets Slack credential with valid token", async () => {
+    const token = broker.createRootToken({
+      agentId: "slack-bot",
+      scopes: ["slack:chat:write"],
+      ttlDays: 1,
+    });
+
+    const cred = await broker.getCredential(token, "slack:chat:write", "#general");
+
+    assert.strictEqual(cred.credentialType, "bearer_token");
+    assert.strictEqual(cred.credential.token, "xoxb-test-credential-token");
+    assert.strictEqual(cred.credential.mode, "bot");
+  });
+
+  test("denies Slack credential for unauthorized scope", async () => {
+    const token = broker.createRootToken({
+      agentId: "slack-bot",
+      scopes: ["slack:chat:write"],
+      ttlDays: 1,
+    });
+
+    await assert.rejects(
+      async () => {
+        await broker.getCredential(token, "slack:files:write", "");
+      },
+      { message: /Permission denied/ }
+    );
+  });
+
+  test("throws when Slack provider not configured", async () => {
+    // Use a fresh broker without Slack configured
+    const freshDir = createTempDir();
+    const freshBroker = new Broker(freshDir);
+
+    const token = freshBroker.createRootToken({
+      agentId: "test",
+      scopes: ["slack:chat:write"],
+      ttlDays: 1,
+    });
+
+    await assert.rejects(
+      async () => {
+        await freshBroker.getCredential(token, "slack:chat:write", "");
+      },
+      { message: /Slack provider not configured/ }
+    );
+
+    cleanupTempDir(freshDir);
+  });
+
+  test("Slack credentials work with delegation", async () => {
+    const root = broker.createRootToken({
+      agentId: "orchestrator",
+      scopes: ["slack:chat:write", "slack:channels:read", "slack:files:write"],
+      ttlDays: 1,
+    });
+
+    // Delegate only chat:write to child
+    const child = broker.delegate(root, {
+      agentId: "chat-agent",
+      requestedScopes: ["slack:chat:write"],
+      ttlMinutes: 60,
+    });
+
+    // Child should get chat credential
+    const cred = await broker.getCredential(child, "slack:chat:write", "#general");
+    assert.strictEqual(cred.credentialType, "bearer_token");
+    assert.strictEqual(cred.credential.token, "xoxb-test-credential-token");
+
+    // Child should not get files credential
+    await assert.rejects(
+      async () => {
+        await broker.getCredential(child, "slack:files:write", "");
+      },
+      { message: /Permission denied/ }
+    );
+  });
+
+  test("Slack credentials work with resource constraints", async () => {
+    const root = broker.createRootToken({
+      agentId: "orchestrator",
+      scopes: ["slack:chat:write"],
+      constraints: {
+        "slack:chat:write": { resources: ["#engineering-*"] },
+      },
+      ttlDays: 1,
+    });
+
+    // Should work for matching channel
+    const result = broker.checkPermission(root, "slack:chat:write", "#engineering-backend");
+    assert.strictEqual(result.valid, true);
+
+    // Should fail for non-matching channel
+    const denied = broker.checkPermission(root, "slack:chat:write", "#random");
+    assert.strictEqual(denied.valid, false);
   });
 });

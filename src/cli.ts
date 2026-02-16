@@ -31,19 +31,22 @@ configCmd
 
 configCmd
   .command("init <provider>")
-  .description("Initialize a provider (github, google, aws)")
+  .description("Initialize a provider (github, google, aws, slack)")
   .option("--app-id <appId>", "GitHub App ID")
   .option("--installation-id <installationId>", "GitHub Installation ID")
   .option("--private-key <path>", "Path to private key file")
-  .option("--client-id <clientId>", "Google OAuth Client ID")
-  .option("--client-secret <clientSecret>", "Google OAuth Client Secret")
-  .option("--refresh-token <refreshToken>", "Google OAuth Refresh Token")
+  .option("--client-id <clientId>", "OAuth Client ID (Google/Slack)")
+  .option("--client-secret <clientSecret>", "OAuth Client Secret (Google/Slack)")
+  .option("--refresh-token <refreshToken>", "OAuth Refresh Token (Google/Slack)")
   .option("--region <region>", "AWS region")
   .option("--role-arn <roleArn>", "AWS IAM Role ARN")
   .option("--external-id <externalId>", "AWS External ID for role assumption")
   .option("--session-duration <seconds>", "AWS session duration in seconds")
   .option("--access-key-id <accessKeyId>", "AWS Access Key ID")
   .option("--secret-access-key <secretAccessKey>", "AWS Secret Access Key")
+  .option("--mode <mode>", "Slack auth mode: bot or user", "bot")
+  .option("--token <token>", "Slack bot token (xoxb-...) or user token (xoxp-...)")
+  .option("--team-id <teamId>", "Slack team/workspace ID")
   .action((provider, options) => {
     const broker = new Broker();
 
@@ -88,9 +91,31 @@ configCmd
           secretAccessKey: options.secretAccessKey,
         });
         console.log("AWS provider configured successfully");
+      } else if (provider === "slack") {
+        if (!options.token) {
+          console.error(
+            "Slack provider requires --token (bot token xoxb-... or user token xoxp-...)"
+          );
+          process.exit(1);
+        }
+        if (options.mode === "user" && (!options.clientId || !options.clientSecret)) {
+          console.error(
+            "Slack user mode requires --client-id and --client-secret for token rotation"
+          );
+          process.exit(1);
+        }
+        broker.initProvider("slack", {
+          mode: options.mode,
+          token: options.token,
+          clientId: options.clientId,
+          clientSecret: options.clientSecret,
+          refreshToken: options.refreshToken,
+          teamId: options.teamId,
+        });
+        console.log(`Slack provider configured successfully (${options.mode} mode)`);
       } else {
         console.error(
-          `Unknown provider: ${provider}. Use "github", "google", or "aws".`
+          `Unknown provider: ${provider}. Use "github", "google", "aws", or "slack".`
         );
         console.error('For API keys, use "agent-iam apikey add"');
         process.exit(1);

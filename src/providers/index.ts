@@ -9,3 +9,5 @@ export { AWSProvider } from "./aws.js";
 export type { AWSProviderConfig } from "./aws.js";
 export { APIKeyProvider, APIKeyProviderFactory } from "./apikey.js";
 export type { APIKeyProviderConfig } from "./apikey.js";
+export { SlackProvider } from "./slack.js";
+export type { SlackProviderConfig } from "./slack.js";

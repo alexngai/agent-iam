@@ -12,6 +12,7 @@ import type {
   GoogleProviderConfig,
   AWSProviderConfig,
   APIKeyProviderConfig,
+  SlackProviderConfig,
 } from "./types.js";
 import { generateSecret } from "./token.js";
 
@@ -155,6 +156,27 @@ export class ConfigService {
     this.setProviderConfig("aws", config);
   }
 
+  /** Initialize Slack provider */
+  initSlack(params: {
+    mode: "bot" | "user";
+    token: string;
+    clientId?: string;
+    clientSecret?: string;
+    refreshToken?: string;
+    teamId?: string;
+  }): void {
+    const config: SlackProviderConfig = {
+      mode: params.mode,
+      token: params.token,
+      clientId: params.clientId,
+      clientSecret: params.clientSecret,
+      refreshToken: params.refreshToken,
+      teamId: params.teamId,
+    };
+
+    this.setProviderConfig("slack", config);
+  }
+
   /** Add an API key provider */
   addAPIKey(params: {
     name: string;
@@ -257,6 +279,10 @@ export class ConfigService {
         providerRedacted.privateKeyExists = fs.existsSync(
           providerRedacted.privateKeyPath as string
         );
+      }
+      // Redact Slack token (xoxb-... or xoxp-...)
+      if (provider === "slack" && "token" in providerRedacted) {
+        providerRedacted.token = "***REDACTED***";
       }
 
       (redacted.providers as Record<string, unknown>)[provider] = providerRedacted;
