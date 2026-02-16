@@ -12,6 +12,7 @@ import type {
   GoogleProviderConfig,
   AWSProviderConfig,
   APIKeyProviderConfig,
+  SlackProviderConfig,
 } from "./types.js";
 import { TokenService } from "./token.js";
 import { ConfigService } from "./config.js";
@@ -19,6 +20,7 @@ import { GitHubProvider } from "./providers/github.js";
 import { GoogleProvider } from "./providers/google.js";
 import { AWSProvider } from "./providers/aws.js";
 import { APIKeyProvider } from "./providers/apikey.js";
+import { SlackProvider } from "./providers/slack.js";
 
 /** Credential cache entry */
 interface CacheEntry {
@@ -250,6 +252,15 @@ export class Broker {
         return awsProvider.issueCredential(scope, resource);
       }
 
+      case "slack": {
+        const config = this.configService.getProviderConfig<SlackProviderConfig>("slack");
+        if (!config) {
+          throw new Error("Slack provider not configured");
+        }
+        const slackProvider = new SlackProvider(config);
+        return slackProvider.issueCredential(scope, resource);
+      }
+
       default: {
         // Check if it's a configured API key provider
         const apiKeyConfig = this.configService.getAPIKeyConfig(provider);
@@ -334,6 +345,17 @@ export class Broker {
           sessionDuration: config.sessionDuration ? parseInt(config.sessionDuration, 10) : undefined,
           accessKeyId: config.accessKeyId,
           secretAccessKey: config.secretAccessKey,
+        });
+        break;
+
+      case "slack":
+        this.configService.initSlack({
+          mode: (config.mode as "bot" | "user") ?? "bot",
+          token: config.token,
+          clientId: config.clientId,
+          clientSecret: config.clientSecret,
+          refreshToken: config.refreshToken,
+          teamId: config.teamId,
         });
         break;
 

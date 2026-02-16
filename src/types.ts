@@ -319,13 +319,30 @@ export interface APIKeyProviderConfig {
   additionalHeaders?: Record<string, string>;
 }
 
+/** Slack provider configuration */
+export interface SlackProviderConfig {
+  /** Authentication mode: "bot" for app-level, "user" for user-delegation */
+  mode: "bot" | "user";
+  /** Bot token (xoxb-...) or User token (xoxp-...) */
+  token: string;
+  /** OAuth2 Client ID (required for user mode with token rotation) */
+  clientId?: string;
+  /** OAuth2 Client Secret (required for user mode with token rotation) */
+  clientSecret?: string;
+  /** Refresh token for token rotation (user mode only) */
+  refreshToken?: string;
+  /** Team/workspace ID for scoping */
+  teamId?: string;
+}
+
 /** Provider configurations */
 export interface ProvidersConfig {
   github?: GitHubProviderConfig;
   google?: GoogleProviderConfig;
   aws?: AWSProviderConfig;
+  slack?: SlackProviderConfig;
   apikeys?: Record<string, APIKeyProviderConfig>;
-  [provider: string]: GitHubProviderConfig | GoogleProviderConfig | AWSProviderConfig | Record<string, APIKeyProviderConfig> | undefined;
+  [provider: string]: GitHubProviderConfig | GoogleProviderConfig | AWSProviderConfig | SlackProviderConfig | Record<string, APIKeyProviderConfig> | undefined;
 }
 
 /** Broker configuration stored in config.json */

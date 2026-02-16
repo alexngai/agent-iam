@@ -18,6 +18,7 @@ export { GitHubProvider } from "./providers/github.js";
 export { GoogleProvider } from "./providers/google.js";
 export { AWSProvider } from "./providers/aws.js";
 export { APIKeyProvider, APIKeyProviderFactory } from "./providers/apikey.js";
+export { SlackProvider } from "./providers/slack.js";
 
 // Distributed mode
 export {
@@ -58,6 +59,7 @@ export type {
   GoogleProviderConfig,
   AWSProviderConfig,
   APIKeyProviderConfig,
+  SlackProviderConfig,
   BrokerConfig,
   SerializedToken,
   // MAP integration types
