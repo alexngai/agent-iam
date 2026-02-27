@@ -16,8 +16,8 @@ import type {
 } from "./types.js";
 import { generateSecret } from "./token.js";
 
-/** Default config directory */
-const DEFAULT_CONFIG_DIR = path.join(os.homedir(), ".agent-credentials");
+/** Default config directory (override with AGENT_IAM_HOME env var) */
+const DEFAULT_CONFIG_DIR = process.env.AGENT_IAM_HOME || path.join(os.homedir(), ".agent-credentials");
 
 /** Config file names */
 const CONFIG_FILE = "config.json";
