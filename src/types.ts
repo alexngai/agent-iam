@@ -195,7 +195,7 @@ export interface AgentToken {
    * When present, inherited through delegation chain by default.
    */
   persistentIdentity?: {
-    /** Stable identifier across sessions (e.g., "key:abc...", "platform:uuid") */
+    /** Stable identifier across sessions (e.g., "did:key:z6Mk...", "platform:uuid") */
     persistentId: string;
     /** How this identity was established */
     identityType: string;
@@ -204,28 +204,32 @@ export interface AgentToken {
     /** The challenge that was signed for the proof */
     challenge?: string;
     /**
-     * Public key (PEM or JWK) for self-certifying verification.
+     * Public key (PEM) for self-certifying verification.
      * When present, anyone can verify the identity proof without
      * access to the broker or identity provider.
-     * The persistentId is derived from this key (fingerprint),
-     * so the verifier can confirm the key matches the claimed identity.
+     * For DID:key identities, the persistentId encodes the public key directly.
+     * For legacy key: identities, the persistentId is derived from this key's fingerprint.
      */
     publicKey?: string;
     /**
-     * Authority endorsements on this identity (optional).
-     * Each endorsement is a signature from a trusted authority over
-     * the agent's public key, attesting to some claim about the agent.
-     * Verifiers who trust the authority can use these for stronger
+     * Public key in JWK format for VC/DID ecosystem interoperability.
+     * For Ed25519: { kty: "OKP", crv: "Ed25519", x: "<base64url-raw-key>" }
+     * Both PEM and JWK can coexist — PEM for Node.js crypto, JWK for standards interop.
+     */
+    publicKeyJwk?: JsonWebKey;
+    /**
+     * Endorsements on this identity (optional).
+     * Accepts both legacy AuthorityEndorsement and W3C VerifiableCredential formats.
+     * Verifiers who trust the issuing authority can use these for stronger
      * trust than TOFU alone.
      */
-    endorsements?: AuthorityEndorsement[];
+    endorsements?: Endorsement[];
   };
 }
 
 /**
- * An authority's endorsement (signature) over an agent's public key.
- * Follows the X.509/VC pattern: a trusted party signs the agent's
- * public key + claims, and anyone who trusts that party can verify.
+ * Legacy authority endorsement format.
+ * Kept for backward compatibility — new code should use VerifiableCredential.
  */
 export interface AuthorityEndorsement {
   /** Identifier of the authority (e.g., "acme-corp", "platform:broker-1") */
@@ -240,6 +244,61 @@ export interface AuthorityEndorsement {
   issuedAt: string;
   /** When the endorsement expires (ISO 8601, optional) */
   expiresAt?: string;
+}
+
+/**
+ * W3C Verifiable Credential-aligned endorsement format.
+ * Adopts the VC data model structure for interoperability with
+ * VC-aware systems, without requiring full JSON-LD processing.
+ *
+ * The proof is computed over a JCS (RFC 8785) canonicalization of
+ * the credential's core fields (issuer, credentialSubject, dates).
+ */
+export interface VerifiableCredential {
+  /** Fixed type identifier */
+  type: "VerifiableCredential";
+  /** The issuing authority */
+  issuer: {
+    /** Authority identifier (DID, URI, or plain string) */
+    id: string;
+    /** Human-readable name (optional) */
+    name?: string;
+  };
+  /** When the credential was issued (ISO 8601) */
+  issuanceDate: string;
+  /** When the credential expires (ISO 8601, optional) */
+  expirationDate?: string;
+  /** The subject and claim being attested */
+  credentialSubject: {
+    /** The agent's persistentId (e.g., "did:key:z6Mk...") */
+    id: string;
+    /** What is being attested about this agent */
+    claim: string;
+  };
+  /** Cryptographic proof */
+  proof: {
+    /** Signature algorithm identifier */
+    type: "Ed25519Signature2020";
+    /** Key used for signing (e.g., issuer's DID URL or key ID) */
+    verificationMethod: string;
+    /** When the proof was created (ISO 8601) */
+    created: string;
+    /** The signature value (base64url-encoded) */
+    proofValue: string;
+  };
+}
+
+/** Union type for endorsements — accepts both legacy and VC formats */
+export type Endorsement = AuthorityEndorsement | VerifiableCredential;
+
+/** Type guard for VerifiableCredential format */
+export function isVerifiableCredential(e: Endorsement): e is VerifiableCredential {
+  return (e as VerifiableCredential).type === "VerifiableCredential";
+}
+
+/** Type guard for legacy AuthorityEndorsement format */
+export function isLegacyEndorsement(e: Endorsement): e is AuthorityEndorsement {
+  return !isVerifiableCredential(e);
 }
 
 /** Request to delegate capabilities to a child agent */
@@ -297,7 +356,8 @@ export interface DelegationRequest {
     proof?: string;
     challenge?: string;
     publicKey?: string;
-    endorsements?: AuthorityEndorsement[];
+    publicKeyJwk?: JsonWebKey;
+    endorsements?: Endorsement[];
   };
 }
 
@@ -341,7 +401,8 @@ export interface CreateRootTokenParams {
     proof?: string;
     challenge?: string;
     publicKey?: string;
-    endorsements?: AuthorityEndorsement[];
+    publicKeyJwk?: JsonWebKey;
+    endorsements?: Endorsement[];
   };
 }
 

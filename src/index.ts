@@ -70,6 +70,13 @@ export type {
   FederationMetadata,
   AgentCapabilities,
   AuthorityEndorsement,
+  VerifiableCredential,
+  Endorsement,
+} from "./types.js";
+
+export {
+  isVerifiableCredential,
+  isLegacyEndorsement,
 } from "./types.js";
 
 // Persistent identity
@@ -77,8 +84,13 @@ export {
   IdentityService,
   KeypairIdentityProvider,
   PlatformIdentityProvider,
+  SpiffeIdentityProvider,
+  DidWebIdentityProvider,
   verifyIdentityProof,
   createEndorsement,
+  createVcEndorsement,
+  computeVcSigningPayload,
+  canonicalize,
 } from "./identity/index.js";
 export type {
   IdentityType,
@@ -87,6 +99,11 @@ export type {
   IdentityProvider,
   CreateIdentityOptions,
   IdentityServiceConfig,
+  SpiffeCreateOptions,
+  DidWebCreateOptions,
+  DidDocument,
+  DidVerificationMethod,
+  DidService,
   StandaloneVerificationResult,
   VerifiedEndorsement,
   TrustClaimType,

@@ -26,6 +26,8 @@ import {
   IdentityService,
   KeypairIdentityProvider,
   PlatformIdentityProvider,
+  SpiffeIdentityProvider,
+  DidWebIdentityProvider,
 } from "./identity/index.js";
 import type { PersistentIdentity, IdentityType } from "./identity/index.js";
 
@@ -62,6 +64,8 @@ export class Broker {
     const cfgDir = this.configService.getConfigDir();
     this.identityService.registerProvider(new KeypairIdentityProvider(cfgDir));
     this.identityService.registerProvider(new PlatformIdentityProvider(cfgDir));
+    this.identityService.registerProvider(new SpiffeIdentityProvider(cfgDir));
+    this.identityService.registerProvider(new DidWebIdentityProvider(cfgDir));
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -307,6 +311,7 @@ export class Broker {
     // For platform (HMAC) identities, publicKey will be undefined — these identities
     // can only be verified via Broker.verifyTokenIdentity(), not standalone.
     const publicKey = (identity.metadata.publicKey as string) ?? undefined;
+    const publicKeyJwk = (identity.metadata.publicKeyJwk as JsonWebKey) ?? undefined;
 
     // 5. Embed proof + public key in the token — self-certifying
     return this.tokenService.createRootToken({
@@ -317,6 +322,7 @@ export class Broker {
         challenge,
         proof: identityProof.proof,
         publicKey,
+        publicKeyJwk,
       },
     });
   }

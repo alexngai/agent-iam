@@ -170,14 +170,20 @@ export class IdentityService {
 
   /**
    * Infer the identity type from a persistent ID prefix.
-   * Convention: "key:..." → keypair, "platform:..." → platform,
-   *             "agent://..." → attested, "did:..." → decentralized
+   * Convention:
+   *   "did:key:..." → keypair (W3C DID:key, Ed25519)
+   *   "key:..."     → keypair (legacy fingerprint format)
+   *   "platform:..." → platform
+   *   "spiffe://..." → attested
+   *   "did:web:..." / "did:wba:..." → decentralized
    */
   private inferType(persistentId: string): IdentityType | null {
+    if (persistentId.startsWith("did:key:")) return "keypair";
     if (persistentId.startsWith("key:")) return "keypair";
     if (persistentId.startsWith("platform:")) return "platform";
-    if (persistentId.startsWith("agent://")) return "attested";
-    if (persistentId.startsWith("did:")) return "decentralized";
+    if (persistentId.startsWith("spiffe://")) return "attested";
+    if (persistentId.startsWith("did:web:")) return "decentralized";
+    if (persistentId.startsWith("did:wba:")) return "decentralized";
     return null;
   }
 }

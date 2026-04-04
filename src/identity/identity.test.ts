@@ -29,13 +29,14 @@ describe("KeypairIdentityProvider", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test("creates a keypair identity with key: prefix", async () => {
+  test("creates a keypair identity with did:key: prefix", async () => {
     const identity = await provider.create({ label: "test-agent" });
 
-    assert.ok(identity.persistentId.startsWith("key:"));
+    assert.ok(identity.persistentId.startsWith("did:key:z6Mk"), `Expected did:key:z6Mk prefix, got: ${identity.persistentId}`);
     assert.strictEqual(identity.identityType, "keypair");
     assert.strictEqual(identity.label, "test-agent");
     assert.ok(identity.metadata.publicKey);
+    assert.ok(identity.metadata.publicKeyJwk);
     assert.strictEqual(identity.metadata.algorithm, "ed25519");
     assert.ok(identity.createdAt);
   });
@@ -108,7 +109,7 @@ describe("KeypairIdentityProvider", () => {
     assert.strictEqual(loaded, null);
 
     // Verify key file is gone
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
     const keyPath = path.join(tmpDir, "identities", `${fingerprint}.key`);
     assert.strictEqual(fs.existsSync(keyPath), false);
   });
@@ -278,7 +279,7 @@ describe("IdentityService", () => {
 
   test("creates identity with default type", async () => {
     const identity = await service.createIdentity({ label: "default" });
-    assert.ok(identity.persistentId.startsWith("key:"));
+    assert.ok(identity.persistentId.startsWith("did:key:z6Mk"), `Expected did:key:z6Mk prefix, got: ${identity.persistentId}`);
   });
 
   test("creates identity with explicit type", async () => {
@@ -803,7 +804,7 @@ describe("Standalone identity verification (no broker)", () => {
 
     const result = verifyIdentityProof(token);
     assert.strictEqual(result.valid, false);
-    assert.ok(result.error!.includes("fingerprint mismatch"));
+    assert.ok(result.error!.includes("mismatch"), `Expected mismatch error, got: ${result.error}`);
   });
 
   test("rejects token with tampered proof", async () => {
@@ -1091,7 +1092,7 @@ describe("Error handling and edge cases", () => {
   test("keypair prove() with corrupted private key gives clear error", async () => {
     const provider = new KeypairIdentityProvider(tmpDir);
     const identity = await provider.create();
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
 
     // Corrupt the private key file
     const keyPath = path.join(tmpDir, "identities", `${fingerprint}.key`);
@@ -1114,7 +1115,7 @@ describe("Error handling and edge cases", () => {
     const proof = await provider.prove(identity.persistentId, challenge);
 
     // Corrupt the metadata file's public key
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
     const metaPath = path.join(tmpDir, "identities", `${fingerprint}.json`);
     const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
     meta.metadata.publicKey = "not a valid PEM";
@@ -1129,7 +1130,7 @@ describe("Error handling and edge cases", () => {
 
     await assert.rejects(
       () => provider.revoke("invalid-id"),
-      /must start with "key:"/
+      /must start with "did:key:" or "key:"/
     );
   });
 
@@ -1138,7 +1139,7 @@ describe("Error handling and edge cases", () => {
     const identity = await provider.create();
 
     // Manually delete the key files
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
     fs.unlinkSync(path.join(tmpDir, "identities", `${fingerprint}.key`));
     fs.unlinkSync(path.join(tmpDir, "identities", `${fingerprint}.json`));
 
@@ -1363,5 +1364,1672 @@ describe("Error handling and edge cases", () => {
     assert.ok(refreshed.persistentIdentity!.publicKey);
     assert.ok(refreshed.persistentIdentity!.proof);
     assert.strictEqual(refreshed.expiresAt, newExpiry);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// DID:KEY AND JWK SUPPORT
+// ─────────────────────────────────────────────────────────────────
+
+import {
+  publicKeyToDidKey,
+  didKeyToRawPublicKey,
+  rawPublicKeyToPem,
+  publicKeyToJwk,
+  jwkToPem,
+  isDidKey,
+  isLegacyKeyId,
+  base58btcEncode,
+  base58btcDecode,
+} from "./did-key.js";
+import { createVcEndorsement, computeVcSigningPayload } from "./standalone-verifier.js";
+import { canonicalize } from "./jcs.js";
+import { isVerifiableCredential, isLegacyEndorsement } from "../types.js";
+
+describe("DID:key encoding/decoding", () => {
+  test("base58btc round-trip", () => {
+    const original = crypto.randomBytes(34);
+    const encoded = base58btcEncode(original);
+    const decoded = base58btcDecode(encoded);
+    assert.deepStrictEqual(decoded, original);
+  });
+
+  test("base58btc handles leading zeros", () => {
+    const bytes = Buffer.from([0, 0, 0, 1, 2, 3]);
+    const encoded = base58btcEncode(bytes);
+    assert.ok(encoded.startsWith("111")); // Three leading 1s for three zero bytes
+    const decoded = base58btcDecode(encoded);
+    assert.deepStrictEqual(decoded, bytes);
+  });
+
+  test("base58btc rejects invalid characters", () => {
+    assert.throws(() => base58btcDecode("invalid0OIl"), /Invalid base58btc character/);
+  });
+
+  test("publicKeyToDidKey produces valid DID:key format", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const did = publicKeyToDidKey(publicKey);
+    assert.ok(did.startsWith("did:key:z6Mk"), `Expected did:key:z6Mk prefix, got: ${did}`);
+    assert.ok(isDidKey(did));
+    assert.ok(!isLegacyKeyId(did));
+  });
+
+  test("DID:key round-trip: encode then decode recovers the same public key", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const did = publicKeyToDidKey(publicKey);
+    const rawKey = didKeyToRawPublicKey(did);
+    const recoveredPem = rawPublicKeyToPem(rawKey);
+
+    assert.strictEqual(recoveredPem.trim(), publicKey.trim());
+  });
+
+  test("didKeyToRawPublicKey rejects invalid DID prefix", () => {
+    assert.throws(() => didKeyToRawPublicKey("did:web:example.com"), /must start with "did:key:z"/);
+  });
+
+  test("didKeyToRawPublicKey rejects wrong multicodec prefix", () => {
+    // Encode with wrong prefix (0x1234 instead of 0xed01)
+    const fakeKey = Buffer.concat([Buffer.from([0x12, 0x34]), crypto.randomBytes(32)]);
+    const fakeDidKey = `did:key:z${base58btcEncode(fakeKey)}`;
+    assert.throws(() => didKeyToRawPublicKey(fakeDidKey), /Invalid multicodec prefix/);
+  });
+
+  test("same key always produces the same DID:key", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const did1 = publicKeyToDidKey(publicKey);
+    const did2 = publicKeyToDidKey(publicKey);
+    assert.strictEqual(did1, did2);
+  });
+
+  test("different keys produce different DID:keys", () => {
+    const key1 = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const key2 = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    assert.notStrictEqual(publicKeyToDidKey(key1.publicKey), publicKeyToDidKey(key2.publicKey));
+  });
+});
+
+describe("JWK support", () => {
+  test("publicKeyToJwk produces valid Ed25519 JWK", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const jwk = publicKeyToJwk(publicKey);
+    assert.strictEqual(jwk.kty, "OKP");
+    assert.strictEqual(jwk.crv, "Ed25519");
+    assert.ok(jwk.x, "JWK should have x parameter");
+    // x should be base64url-encoded 32 bytes
+    const xBytes = Buffer.from(jwk.x as string, "base64url");
+    assert.strictEqual(xBytes.length, 32);
+  });
+
+  test("JWK round-trip: PEM → JWK → PEM", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const jwk = publicKeyToJwk(publicKey);
+    const recoveredPem = jwkToPem(jwk);
+    assert.strictEqual(recoveredPem.trim(), publicKey.trim());
+  });
+
+  test("token includes publicKeyJwk when created via broker", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-jwk-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "jwk-agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      assert.ok(token.persistentIdentity!.publicKeyJwk, "Token should have publicKeyJwk");
+      assert.strictEqual(token.persistentIdentity!.publicKeyJwk!.kty, "OKP");
+      assert.strictEqual(token.persistentIdentity!.publicKeyJwk!.crv, "Ed25519");
+
+      // JWK and PEM should represent the same key
+      const pemFromJwk = jwkToPem(token.persistentIdentity!.publicKeyJwk!);
+      assert.strictEqual(pemFromJwk.trim(), token.persistentIdentity!.publicKey!.trim());
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("DID:key migration", () => {
+  test("migrates legacy key: identity to did:key: format", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-migrate-"));
+    try {
+      const provider = new KeypairIdentityProvider(tmpDir2);
+
+      // Manually create a legacy-format identity
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const fingerprint = crypto
+        .createHash("sha256")
+        .update(publicKey)
+        .digest("hex")
+        .slice(0, 32);
+      const legacyId = `key:${fingerprint}`;
+
+      const identityDir = path.join(tmpDir2, "identities");
+      fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        path.join(identityDir, `${fingerprint}.key`),
+        privateKey,
+        { mode: 0o600 }
+      );
+      fs.writeFileSync(
+        path.join(identityDir, `${fingerprint}.json`),
+        JSON.stringify({
+          persistentId: legacyId,
+          identityType: "keypair",
+          createdAt: new Date().toISOString(),
+          metadata: { publicKey, algorithm: "ed25519", fingerprint },
+        }),
+        { mode: 0o600 }
+      );
+
+      // Verify legacy identity loads
+      const legacy = await provider.load(legacyId);
+      assert.ok(legacy);
+      assert.strictEqual(legacy!.persistentId, legacyId);
+
+      // Migrate
+      const migrated = await provider.migrate(legacyId);
+      assert.ok(migrated);
+      assert.ok(migrated!.persistentId.startsWith("did:key:z6Mk"));
+      assert.ok(migrated!.metadata.publicKeyJwk, "Migration should add JWK");
+
+      // Load using new DID:key ID
+      const loaded = await provider.load(migrated!.persistentId);
+      assert.ok(loaded);
+      assert.strictEqual(loaded!.persistentId, migrated!.persistentId);
+
+      // Prove/verify still works with new ID
+      const challenge = "migration-test-challenge";
+      const proof = await provider.prove(migrated!.persistentId, challenge);
+      const valid = await provider.verify(proof, challenge);
+      assert.strictEqual(valid, true);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("migrate() rejects non-legacy IDs", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-migrate-"));
+    try {
+      const provider = new KeypairIdentityProvider(tmpDir2);
+      await assert.rejects(
+        () => provider.migrate("did:key:z6MkInvalid"),
+        /Not a legacy key: identity/
+      );
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Backward compatibility — legacy key: format", () => {
+  test("legacy key: identities can still be loaded and proven", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-compat-"));
+    try {
+      const provider = new KeypairIdentityProvider(tmpDir2);
+
+      // Create a legacy-format identity on disk
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const fingerprint = crypto
+        .createHash("sha256")
+        .update(publicKey)
+        .digest("hex")
+        .slice(0, 32);
+      const legacyId = `key:${fingerprint}`;
+
+      const identityDir = path.join(tmpDir2, "identities");
+      fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(identityDir, `${fingerprint}.key`), privateKey, { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(identityDir, `${fingerprint}.json`),
+        JSON.stringify({
+          persistentId: legacyId,
+          identityType: "keypair",
+          createdAt: new Date().toISOString(),
+          metadata: { publicKey, algorithm: "ed25519", fingerprint },
+        }),
+        { mode: 0o600 }
+      );
+
+      // Load, prove, verify with legacy ID
+      const loaded = await provider.load(legacyId);
+      assert.ok(loaded);
+      assert.strictEqual(loaded!.persistentId, legacyId);
+
+      const challenge = "legacy-compat-challenge";
+      const proof = await provider.prove(legacyId, challenge);
+      const valid = await provider.verify(proof, challenge);
+      assert.strictEqual(valid, true);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("standalone verifier accepts legacy key: tokens", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-compat-"));
+    try {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const fingerprint = crypto
+        .createHash("sha256")
+        .update(publicKey)
+        .digest("hex")
+        .slice(0, 32);
+      const legacyId = `key:${fingerprint}`;
+      const challenge = "legacy-standalone-challenge";
+
+      const privateKeyObj = crypto.createPrivateKey(privateKey);
+      const proof = crypto.sign(null, Buffer.from(challenge), privateKeyObj).toString("base64url");
+
+      // Build a token with legacy key: format
+      const token = {
+        agentId: "legacy-agent",
+        scopes: ["github:repo:read"],
+        constraints: {},
+        delegatable: true,
+        maxDelegationDepth: 3,
+        currentDepth: 0,
+        persistentIdentity: {
+          persistentId: legacyId,
+          identityType: "keypair",
+          proof,
+          challenge,
+          publicKey,
+        },
+      } as any;
+
+      const result = verifyIdentityProof(token);
+      assert.strictEqual(result.valid, true);
+      assert.strictEqual(result.persistentId, legacyId);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("IdentityService.inferType routes did:key: to keypair provider", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-infer-"));
+    try {
+      const service = new IdentityService({ defaultType: "keypair" });
+      const provider = new KeypairIdentityProvider(tmpDir2);
+      service.registerProvider(provider);
+
+      const identity = await service.createIdentity({ type: "keypair" });
+      assert.ok(identity.persistentId.startsWith("did:key:"));
+
+      // Load via IdentityService should route to keypair provider
+      const loaded = await service.loadIdentity(identity.persistentId);
+      assert.ok(loaded);
+      assert.strictEqual(loaded!.persistentId, identity.persistentId);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("DID:key standalone verification", () => {
+  test("verifies DID:key identity using only token data", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didverify-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "did-agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      assert.ok(token.persistentIdentity!.persistentId.startsWith("did:key:"));
+
+      const result = verifyIdentityProof(token);
+      assert.strictEqual(result.valid, true);
+      assert.strictEqual(result.persistentId, identity.persistentId);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects DID:key token with substituted public key", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didverify-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      // Substitute a different public key
+      const { publicKey: fakeKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+      token.persistentIdentity!.publicKey = fakeKey;
+
+      const result = verifyIdentityProof(token);
+      assert.strictEqual(result.valid, false);
+      assert.ok(result.error!.includes("mismatch"));
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("endorsements work with DID:key identities", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didendorse-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "endorsed-agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      const authorityKeypair = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const endorsement = createEndorsement(
+        "standards-authority",
+        authorityKeypair.privateKey,
+        authorityKeypair.publicKey,
+        identity.persistentId,
+        token.persistentIdentity!.publicKey!,
+        "certified-agent"
+      );
+      token.persistentIdentity!.endorsements = [endorsement];
+
+      const result = verifyIdentityProof(token, {
+        trustedAuthorities: { "standards-authority": authorityKeypair.publicKey },
+      });
+
+      assert.strictEqual(result.valid, true);
+      assert.strictEqual(result.verifiedEndorsements!.length, 1);
+      assert.strictEqual(result.verifiedEndorsements![0].claim, "certified-agent");
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// JCS CANONICALIZATION (RFC 8785)
+// ─────────────────────────────────────────────────────────────────
+
+describe("JCS canonicalization", () => {
+  test("sorts object keys lexicographically", () => {
+    const result = canonicalize({ z: 1, a: 2, m: 3 });
+    assert.strictEqual(result, '{"a":2,"m":3,"z":1}');
+  });
+
+  test("handles nested objects", () => {
+    const result = canonicalize({ b: { z: 1, a: 2 }, a: "hello" });
+    assert.strictEqual(result, '{"a":"hello","b":{"a":2,"z":1}}');
+  });
+
+  test("handles arrays (preserves order)", () => {
+    const result = canonicalize({ items: [3, 1, 2] });
+    assert.strictEqual(result, '{"items":[3,1,2]}');
+  });
+
+  test("handles null", () => {
+    assert.strictEqual(canonicalize(null), "null");
+  });
+
+  test("handles booleans", () => {
+    assert.strictEqual(canonicalize(true), "true");
+    assert.strictEqual(canonicalize(false), "false");
+  });
+
+  test("handles strings with special characters", () => {
+    assert.strictEqual(canonicalize("hello\nworld"), '"hello\\nworld"');
+  });
+
+  test("omits undefined values", () => {
+    const result = canonicalize({ a: 1, b: undefined, c: 3 });
+    assert.strictEqual(result, '{"a":1,"c":3}');
+  });
+
+  test("deterministic: same input always same output", () => {
+    const obj = { issuer: { id: "did:key:z6Mk123" }, claim: "test" };
+    const r1 = canonicalize(obj);
+    const r2 = canonicalize(obj);
+    assert.strictEqual(r1, r2);
+  });
+
+  test("rejects Infinity and NaN", () => {
+    assert.throws(() => canonicalize(Infinity), /Infinity/);
+    assert.throws(() => canonicalize(NaN), /NaN/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// VC-FORMAT ENDORSEMENTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("VC-format endorsements", () => {
+  let tmpDir: string;
+  let broker: Broker;
+  let authorityPrivateKey: string;
+  let authorityPublicKey: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-vc-"));
+    broker = new Broker(tmpDir);
+
+    const keypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    authorityPrivateKey = keypair.privateKey;
+    authorityPublicKey = keypair.publicKey;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("createVcEndorsement produces valid VC structure", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "member-of:acme-engineering",
+      { issuerName: "Acme Corp" }
+    );
+
+    assert.strictEqual(vc.type, "VerifiableCredential");
+    assert.strictEqual(vc.issuer.id, "did:web:acme-corp.com");
+    assert.strictEqual(vc.issuer.name, "Acme Corp");
+    assert.strictEqual(vc.credentialSubject.id, identity.persistentId);
+    assert.strictEqual(vc.credentialSubject.claim, "member-of:acme-engineering");
+    assert.strictEqual(vc.proof.type, "Ed25519Signature2020");
+    assert.ok(vc.proof.proofValue);
+    assert.ok(vc.issuanceDate);
+    assert.strictEqual(vc.expirationDate, undefined);
+  });
+
+  test("createVcEndorsement with expiration date", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const expiry = new Date(Date.now() + 86400000).toISOString();
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "certified",
+      { expirationDate: expiry }
+    );
+
+    assert.strictEqual(vc.expirationDate, expiry);
+  });
+
+  test("VC endorsement verifies via standalone verifier", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "vc-endorsed-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "member-of:acme-engineering"
+    );
+
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].authorityId, "did:web:acme-corp.com");
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "member-of:acme-engineering");
+  });
+
+  test("VC endorsement from untrusted issuer is ignored", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const vc = createVcEndorsement(
+      "did:web:untrusted.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "some-claim"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("expired VC endorsement is not verified", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "expired-claim",
+      { expirationDate: new Date(Date.now() - 1000).toISOString() }
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("VC endorsement with forged signature is rejected", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Create endorsement with a different private key
+    const fakeKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      fakeKeypair.privateKey,
+      fakeKeypair.publicKey,
+      identity.persistentId,
+      "forged-claim"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    // Trust the real authority key, not the forger's
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("type guards distinguish VC from legacy endorsements", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const legacyEndorsement = createEndorsement(
+      "legacy-authority",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "legacy-claim"
+    );
+
+    const vcEndorsement = createVcEndorsement(
+      "did:web:modern-authority.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "vc-claim"
+    );
+
+    assert.strictEqual(isLegacyEndorsement(legacyEndorsement), true);
+    assert.strictEqual(isVerifiableCredential(legacyEndorsement), false);
+    assert.strictEqual(isVerifiableCredential(vcEndorsement), true);
+    assert.strictEqual(isLegacyEndorsement(vcEndorsement), false);
+  });
+
+  test("mixed legacy and VC endorsements on same token", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "mixed-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const legacyEndorsement = createEndorsement(
+      "legacy-corp",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "legacy-claim"
+    );
+
+    const vcEndorsement = createVcEndorsement(
+      "did:web:modern-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "modern-claim"
+    );
+
+    token.persistentIdentity!.endorsements = [legacyEndorsement, vcEndorsement];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: {
+        "legacy-corp": authorityPublicKey,
+        "did:web:modern-corp.com": authorityPublicKey,
+      },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 2);
+
+    const claims = result.verifiedEndorsements!.map(e => e.claim).sort();
+    assert.deepStrictEqual(claims, ["legacy-claim", "modern-claim"]);
+  });
+
+  test("createVcEndorsement throws on empty issuerId", () => {
+    assert.throws(
+      () => createVcEndorsement("", "key", "key", "id", "claim"),
+      /issuerId is required/
+    );
+  });
+
+  test("createVcEndorsement throws on invalid private key", () => {
+    assert.throws(
+      () => createVcEndorsement("did:web:x.com", "bad-key", "key", "id", "claim"),
+      /invalid issuer private key/
+    );
+  });
+
+  test("VC signing payload is deterministic via JCS", async () => {
+    const issuer = { id: "did:web:acme.com", name: "Acme" };
+    const subject = { id: "did:key:z6MkTest", claim: "test-claim" };
+    const date = "2025-01-01T00:00:00.000Z";
+
+    const payload1 = computeVcSigningPayload(issuer, subject, date);
+    const payload2 = computeVcSigningPayload(issuer, subject, date);
+
+    assert.strictEqual(payload1, payload2);
+    // Should be sorted by keys
+    assert.ok(payload1.includes('"credentialSubject"'));
+    assert.ok(payload1.includes('"issuanceDate"'));
+    assert.ok(payload1.includes('"issuer"'));
+  });
+
+  test("VC serialization round-trip preserves all fields", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+
+    const vc = createVcEndorsement(
+      "did:web:acme.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "test-claim",
+      {
+        issuerName: "Acme Corp",
+        expirationDate: new Date(Date.now() + 86400000).toISOString(),
+      }
+    );
+
+    const serialized = JSON.stringify(vc);
+    const deserialized = JSON.parse(serialized);
+
+    assert.strictEqual(deserialized.type, "VerifiableCredential");
+    assert.strictEqual(deserialized.issuer.id, "did:web:acme.com");
+    assert.strictEqual(deserialized.issuer.name, "Acme Corp");
+    assert.strictEqual(deserialized.credentialSubject.id, identity.persistentId);
+    assert.strictEqual(deserialized.credentialSubject.claim, "test-claim");
+    assert.ok(deserialized.expirationDate);
+    assert.ok(deserialized.proof.proofValue);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// SPIFFE IDENTITY PROVIDER
+// ─────────────────────────────────────────────────────────────────
+
+import { SpiffeIdentityProvider } from "./spiffe-provider.js";
+import type { SpiffeCreateOptions } from "./spiffe-provider.js";
+
+describe("SpiffeIdentityProvider", () => {
+  let tmpDir: string;
+  let provider: SpiffeIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-spiffe-"));
+    provider = new SpiffeIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("creates a SPIFFE identity with spiffe:// prefix", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/code-reviewer",
+      label: "reviewer",
+    } as SpiffeCreateOptions);
+
+    assert.strictEqual(identity.persistentId, "spiffe://example.com/agents/code-reviewer");
+    assert.strictEqual(identity.identityType, "attested");
+    assert.strictEqual(identity.label, "reviewer");
+    assert.strictEqual(identity.metadata.trustDomain, "example.com");
+    assert.ok(identity.metadata.publicKey);
+    assert.strictEqual(identity.metadata.algorithm, "ed25519");
+    assert.ok(identity.createdAt);
+  });
+
+  test("rejects invalid SPIFFE IDs", async () => {
+    await assert.rejects(
+      () => provider.create({ spiffeId: "not-a-spiffe-id" } as SpiffeCreateOptions),
+      /Invalid SPIFFE ID/
+    );
+
+    await assert.rejects(
+      () => provider.create({ spiffeId: "spiffe://UPPER/path" } as SpiffeCreateOptions),
+      /Invalid SPIFFE ID/
+    );
+  });
+
+  test("requires spiffeId option", async () => {
+    await assert.rejects(
+      () => provider.create({ label: "no-spiffe-id" }),
+      /requires a spiffeId/
+    );
+  });
+
+  test("persists identity and loads it back", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/test",
+    } as SpiffeCreateOptions);
+
+    const loaded = await provider.load(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.persistentId, identity.persistentId);
+    assert.strictEqual(loaded!.metadata.trustDomain, "example.com");
+  });
+
+  test("returns null for unknown identity", async () => {
+    const loaded = await provider.load("spiffe://example.com/agents/unknown");
+    assert.strictEqual(loaded, null);
+  });
+
+  test("lists all identities", async () => {
+    await provider.create({ spiffeId: "spiffe://example.com/agents/a" } as SpiffeCreateOptions);
+    await provider.create({ spiffeId: "spiffe://example.com/agents/b" } as SpiffeCreateOptions);
+
+    const identities = await provider.list();
+    assert.strictEqual(identities.length, 2);
+  });
+
+  test("generates and verifies identity proof (Ed25519)", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/prover",
+    } as SpiffeCreateOptions);
+
+    const challenge = "spiffe-challenge-12345";
+    const proof = await provider.prove(identity.persistentId, challenge);
+
+    assert.strictEqual(proof.persistentId, identity.persistentId);
+    assert.strictEqual(proof.identityType, "attested");
+    assert.strictEqual(proof.challenge, challenge);
+    assert.ok(proof.proof);
+
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rejects proof with wrong challenge", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/test",
+    } as SpiffeCreateOptions);
+
+    const proof = await provider.prove(identity.persistentId, "challenge-a");
+    const valid = await provider.verify(proof, "challenge-b");
+    assert.strictEqual(valid, false);
+  });
+
+  test("rejects proof with tampered signature", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/test",
+    } as SpiffeCreateOptions);
+
+    const challenge = "tamper-test";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    proof.proof = proof.proof.slice(0, -4) + "XXXX";
+
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, false);
+  });
+
+  test("revokes identity and prevents loading/proving", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/revokable",
+    } as SpiffeCreateOptions);
+
+    await provider.revoke(identity.persistentId);
+
+    const loaded = await provider.load(identity.persistentId);
+    assert.strictEqual(loaded, null);
+
+    await assert.rejects(
+      () => provider.prove(identity.persistentId, "challenge"),
+      /not found or revoked/
+    );
+  });
+
+  test("revoke() throws on invalid SPIFFE ID format", async () => {
+    await assert.rejects(
+      () => provider.revoke("key:something"),
+      /must start with "spiffe:\/\/"/
+    );
+  });
+
+  test("revoke() throws on unknown identity", async () => {
+    await assert.rejects(
+      () => provider.revoke("spiffe://example.com/agents/nonexistent"),
+      /not found/
+    );
+  });
+
+  test("proof from one identity does not verify as another", async () => {
+    const id1 = await provider.create({
+      spiffeId: "spiffe://example.com/agents/agent-1",
+    } as SpiffeCreateOptions);
+    await provider.create({
+      spiffeId: "spiffe://example.com/agents/agent-2",
+    } as SpiffeCreateOptions);
+
+    const challenge = "cross-identity-test";
+    const proof = await provider.prove(id1.persistentId, challenge);
+
+    // Swap the persistent ID
+    proof.persistentId = "spiffe://example.com/agents/agent-2";
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, false);
+  });
+
+  test("accepts pre-provisioned SVID key pair", async () => {
+    const keypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/provisioned",
+      svidPrivateKey: keypair.privateKey,
+      svidPublicKey: keypair.publicKey,
+    } as SpiffeCreateOptions);
+
+    assert.strictEqual(identity.metadata.publicKey, keypair.publicKey);
+
+    // Should be able to prove with the provided key
+    const challenge = "pre-provisioned-challenge";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+});
+
+describe("SPIFFE SVID rotation", () => {
+  let tmpDir: string;
+  let provider: SpiffeIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-spiffe-rotate-"));
+    provider = new SpiffeIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("rotates SVID key material while preserving SPIFFE ID", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/rotatable",
+    } as SpiffeCreateOptions);
+
+    const oldPublicKey = identity.metadata.publicKey;
+
+    // Rotate
+    const rotated = await provider.rotateSvid(identity.persistentId);
+
+    // Same SPIFFE ID
+    assert.strictEqual(rotated.persistentId, identity.persistentId);
+    // Different public key
+    assert.notStrictEqual(rotated.metadata.publicKey, oldPublicKey);
+
+    // Old proofs should fail (key changed)
+    // New proofs should succeed
+    const challenge = "post-rotation-challenge";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rotates with externally provided key pair", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/external-rotate",
+    } as SpiffeCreateOptions);
+
+    const newKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const rotated = await provider.rotateSvid(
+      identity.persistentId,
+      newKeypair.privateKey,
+      newKeypair.publicKey
+    );
+
+    assert.strictEqual(rotated.metadata.publicKey, newKeypair.publicKey);
+
+    const challenge = "external-rotation";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rotation fails for revoked identity", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/revoked-rotate",
+    } as SpiffeCreateOptions);
+
+    await provider.revoke(identity.persistentId);
+
+    await assert.rejects(
+      () => provider.rotateSvid(identity.persistentId),
+      /not found or revoked/
+    );
+  });
+});
+
+describe("SPIFFE integration with IdentityService and Broker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-spiffe-int-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("IdentityService routes spiffe:// to attested provider", async () => {
+    const service = new IdentityService();
+    service.registerProvider(new KeypairIdentityProvider(tmpDir));
+    service.registerProvider(new SpiffeIdentityProvider(tmpDir));
+
+    const identity = await service.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/routed",
+    } as any);
+
+    assert.strictEqual(identity.persistentId, "spiffe://example.com/agents/routed");
+    assert.strictEqual(identity.identityType, "attested");
+
+    // Load via service should route correctly
+    const loaded = await service.loadIdentity(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.identityType, "attested");
+  });
+
+  test("Broker creates token with SPIFFE identity", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/broker-test",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "spiffe-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    assert.ok(token.persistentIdentity);
+    assert.strictEqual(token.persistentIdentity!.persistentId, "spiffe://example.com/agents/broker-test");
+    assert.strictEqual(token.persistentIdentity!.identityType, "attested");
+    assert.ok(token.persistentIdentity!.proof);
+    assert.ok(token.persistentIdentity!.publicKey);
+  });
+
+  test("Broker verifies SPIFFE identity token", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/verifiable",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "spiffe-verified", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+
+  test("SPIFFE identity verifies standalone (no broker)", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/standalone",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "spiffe-standalone", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Standalone verification — no broker needed
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, "spiffe://example.com/agents/standalone");
+    assert.ok(result.publicKey);
+  });
+
+  test("SPIFFE identity inherits through delegation", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/parent",
+    } as any);
+
+    const parent = await broker.createRootTokenWithIdentity(
+      { agentId: "parent", scopes: ["github:repo:read", "github:repo:write"] },
+      identity.persistentId
+    );
+
+    const child = broker.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+    });
+
+    assert.ok(child.persistentIdentity);
+    assert.strictEqual(child.persistentIdentity!.persistentId, identity.persistentId);
+    assert.strictEqual(child.persistentIdentity!.identityType, "attested");
+  });
+
+  test("SPIFFE token works with VC endorsements", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/endorsed",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "endorsed-spiffe", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const authorityKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const vc = createVcEndorsement(
+      "did:web:infra-authority.com",
+      authorityKeypair.privateKey,
+      authorityKeypair.publicKey,
+      identity.persistentId,
+      "workload-attested"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:infra-authority.com": authorityKeypair.publicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "workload-attested");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// DID:WEB / DID:WBA IDENTITY PROVIDER
+// ─────────────────────────────────────────────────────────────────
+
+import { DidWebIdentityProvider } from "./did-web-provider.js";
+import type { DidWebCreateOptions } from "./did-web-provider.js";
+
+describe("DidWebIdentityProvider", () => {
+  let tmpDir: string;
+  let provider: DidWebIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didweb-"));
+    provider = new DidWebIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("creates a did:web identity", async () => {
+    const identity = await provider.create({
+      did: "did:web:agents.example.com:code-reviewer",
+      label: "reviewer",
+    } as DidWebCreateOptions);
+
+    assert.strictEqual(identity.persistentId, "did:web:agents.example.com:code-reviewer");
+    assert.strictEqual(identity.identityType, "decentralized");
+    assert.strictEqual(identity.label, "reviewer");
+    assert.strictEqual(identity.metadata.method, "web");
+    assert.strictEqual(identity.metadata.domain, "agents.example.com");
+    assert.ok(identity.metadata.publicKey);
+    assert.ok(identity.metadata.publicKeyJwk);
+    assert.strictEqual(identity.metadata.algorithm, "ed25519");
+  });
+
+  test("creates a did:wba identity", async () => {
+    const identity = await provider.create({
+      did: "did:wba:agents.example.com:federation:node-1",
+      label: "fed-node",
+    } as DidWebCreateOptions);
+
+    assert.strictEqual(identity.persistentId, "did:wba:agents.example.com:federation:node-1");
+    assert.strictEqual(identity.metadata.method, "wba");
+    assert.strictEqual(identity.metadata.domain, "agents.example.com");
+  });
+
+  test("rejects invalid DID format", async () => {
+    await assert.rejects(
+      () => provider.create({ did: "did:key:z6MkTest" } as DidWebCreateOptions),
+      /Must start with "did:web:" or "did:wba:"/
+    );
+
+    await assert.rejects(
+      () => provider.create({ did: "not-a-did" } as DidWebCreateOptions),
+      /Must start with "did:web:" or "did:wba:"/
+    );
+  });
+
+  test("requires did option", async () => {
+    await assert.rejects(
+      () => provider.create({ label: "no-did" }),
+      /requires a did option/
+    );
+  });
+
+  test("persists identity and loads it back", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:agents:test",
+    } as DidWebCreateOptions);
+
+    const loaded = await provider.load(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.persistentId, identity.persistentId);
+    assert.strictEqual(loaded!.metadata.domain, "example.com");
+  });
+
+  test("returns null for unknown identity", async () => {
+    const loaded = await provider.load("did:web:example.com:unknown");
+    assert.strictEqual(loaded, null);
+  });
+
+  test("lists all identities", async () => {
+    await provider.create({ did: "did:web:example.com:a" } as DidWebCreateOptions);
+    await provider.create({ did: "did:web:example.com:b" } as DidWebCreateOptions);
+    await provider.create({ did: "did:wba:other.com:c" } as DidWebCreateOptions);
+
+    const identities = await provider.list();
+    assert.strictEqual(identities.length, 3);
+  });
+
+  test("generates and verifies identity proof (Ed25519)", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:agents:prover",
+    } as DidWebCreateOptions);
+
+    const challenge = "didweb-challenge-12345";
+    const proof = await provider.prove(identity.persistentId, challenge);
+
+    assert.strictEqual(proof.persistentId, identity.persistentId);
+    assert.strictEqual(proof.identityType, "decentralized");
+    assert.ok(proof.proof);
+
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rejects proof with wrong challenge", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:test",
+    } as DidWebCreateOptions);
+
+    const proof = await provider.prove(identity.persistentId, "challenge-a");
+    const valid = await provider.verify(proof, "challenge-b");
+    assert.strictEqual(valid, false);
+  });
+
+  test("rejects proof with tampered signature", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:test",
+    } as DidWebCreateOptions);
+
+    const proof = await provider.prove(identity.persistentId, "challenge");
+    proof.proof = proof.proof.slice(0, -4) + "XXXX";
+
+    const valid = await provider.verify(proof, "challenge");
+    assert.strictEqual(valid, false);
+  });
+
+  test("revokes identity and prevents loading/proving", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:revokable",
+    } as DidWebCreateOptions);
+
+    await provider.revoke(identity.persistentId);
+
+    const loaded = await provider.load(identity.persistentId);
+    assert.strictEqual(loaded, null);
+
+    await assert.rejects(
+      () => provider.prove(identity.persistentId, "challenge"),
+      /not found or revoked/
+    );
+  });
+
+  test("revoke() throws on invalid DID format", async () => {
+    await assert.rejects(
+      () => provider.revoke("spiffe://example.com/agent"),
+      /must start with "did:web:" or "did:wba:"/
+    );
+  });
+
+  test("revoke() throws on unknown identity", async () => {
+    await assert.rejects(
+      () => provider.revoke("did:web:example.com:nonexistent"),
+      /not found/
+    );
+  });
+
+  test("accepts pre-provisioned key pair", async () => {
+    const keypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const identity = await provider.create({
+      did: "did:web:example.com:provisioned",
+      privateKey: keypair.privateKey,
+      publicKey: keypair.publicKey,
+    } as DidWebCreateOptions);
+
+    assert.strictEqual(identity.metadata.publicKey, keypair.publicKey);
+
+    const challenge = "pre-provisioned";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+});
+
+describe("DID:web URL resolution", () => {
+  let provider: DidWebIdentityProvider;
+
+  beforeEach(() => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-resolve-"));
+    provider = new DidWebIdentityProvider(tmpDir);
+  });
+
+  test("domain-only DID resolves to .well-known", () => {
+    const url = provider.didToUrl("did:web:example.com");
+    assert.strictEqual(url, "https://example.com/.well-known/did.json");
+  });
+
+  test("DID with path resolves correctly", () => {
+    const url = provider.didToUrl("did:web:agents.example.com:code-reviewer");
+    assert.strictEqual(url, "https://agents.example.com/code-reviewer/did.json");
+  });
+
+  test("DID with nested path resolves correctly", () => {
+    const url = provider.didToUrl("did:web:example.com:org:team:agent");
+    assert.strictEqual(url, "https://example.com/org/team/agent/did.json");
+  });
+
+  test("did:wba resolves same as did:web", () => {
+    const url = provider.didToUrl("did:wba:agents.example.com:federation:node-1");
+    assert.strictEqual(url, "https://agents.example.com/federation/node-1/did.json");
+  });
+
+  test("rejects non did:web/did:wba identifiers", () => {
+    assert.throws(
+      () => provider.didToUrl("did:key:z6MkTest"),
+      /Not a did:web or did:wba/
+    );
+  });
+});
+
+describe("DID:web DID document", () => {
+  let tmpDir: string;
+  let provider: DidWebIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-diddoc-"));
+    provider = new DidWebIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("generates a valid DID document on creation", async () => {
+    const identity = await provider.create({
+      did: "did:web:agents.example.com:my-agent",
+    } as DidWebCreateOptions);
+
+    const doc = await provider.getDidDocument(identity.persistentId);
+    assert.ok(doc);
+    assert.strictEqual(doc!.id, "did:web:agents.example.com:my-agent");
+    assert.ok(doc!["@context"].includes("https://www.w3.org/ns/did/v1"));
+    assert.strictEqual(doc!.verificationMethod.length, 1);
+    assert.strictEqual(doc!.verificationMethod[0].id, "did:web:agents.example.com:my-agent#key-1");
+    assert.strictEqual(doc!.verificationMethod[0].type, "JsonWebKey2020");
+    assert.strictEqual(doc!.verificationMethod[0].controller, "did:web:agents.example.com:my-agent");
+    assert.ok(doc!.verificationMethod[0].publicKeyJwk);
+    assert.strictEqual(doc!.verificationMethod[0].publicKeyJwk.kty, "OKP");
+    assert.strictEqual(doc!.verificationMethod[0].publicKeyJwk.crv, "Ed25519");
+    assert.deepStrictEqual(doc!.authentication, ["did:web:agents.example.com:my-agent#key-1"]);
+    assert.deepStrictEqual(doc!.assertionMethod, ["did:web:agents.example.com:my-agent#key-1"]);
+  });
+
+  test("includes service endpoints in DID document", async () => {
+    const identity = await provider.create({
+      did: "did:web:agents.example.com:service-agent",
+      services: [
+        {
+          id: "did:web:agents.example.com:service-agent#map",
+          type: "MAPEndpoint",
+          serviceEndpoint: "wss://map.example.com/agents/service-agent",
+        },
+      ],
+    } as DidWebCreateOptions);
+
+    const doc = await provider.getDidDocument(identity.persistentId);
+    assert.ok(doc!.service);
+    assert.strictEqual(doc!.service!.length, 1);
+    assert.strictEqual(doc!.service![0].type, "MAPEndpoint");
+    assert.strictEqual(doc!.service![0].serviceEndpoint, "wss://map.example.com/agents/service-agent");
+  });
+
+  test("returns null for unknown DID document", async () => {
+    const doc = await provider.getDidDocument("did:web:unknown.com:agent");
+    assert.strictEqual(doc, null);
+  });
+});
+
+describe("DID:web key rotation", () => {
+  let tmpDir: string;
+  let provider: DidWebIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didweb-rotate-"));
+    provider = new DidWebIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("rotates key while preserving DID", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:rotatable",
+    } as DidWebCreateOptions);
+
+    const oldPublicKey = identity.metadata.publicKey;
+
+    const rotated = await provider.rotateKey(identity.persistentId);
+
+    assert.strictEqual(rotated.persistentId, identity.persistentId);
+    assert.notStrictEqual(rotated.metadata.publicKey, oldPublicKey);
+
+    // New proofs work
+    const challenge = "post-rotation";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("DID document is updated after rotation", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:doc-rotate",
+    } as DidWebCreateOptions);
+
+    const docBefore = await provider.getDidDocument(identity.persistentId);
+    const jwkBefore = docBefore!.verificationMethod[0].publicKeyJwk;
+
+    await provider.rotateKey(identity.persistentId);
+
+    const docAfter = await provider.getDidDocument(identity.persistentId);
+    const jwkAfter = docAfter!.verificationMethod[0].publicKeyJwk;
+
+    assert.notStrictEqual(jwkBefore.x, jwkAfter.x);
+  });
+
+  test("rotation fails for revoked identity", async () => {
+    const identity = await provider.create({
+      did: "did:web:example.com:revoked-rotate",
+    } as DidWebCreateOptions);
+
+    await provider.revoke(identity.persistentId);
+
+    await assert.rejects(
+      () => provider.rotateKey(identity.persistentId),
+      /not found or revoked/
+    );
+  });
+});
+
+describe("DID:web integration with IdentityService and Broker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didweb-int-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("IdentityService routes did:web: to decentralized provider", async () => {
+    const service = new IdentityService();
+    service.registerProvider(new KeypairIdentityProvider(tmpDir));
+    service.registerProvider(new DidWebIdentityProvider(tmpDir));
+
+    const identity = await service.createIdentity({
+      type: "decentralized",
+      did: "did:web:example.com:agents:routed",
+    } as any);
+
+    assert.strictEqual(identity.persistentId, "did:web:example.com:agents:routed");
+    assert.strictEqual(identity.identityType, "decentralized");
+
+    const loaded = await service.loadIdentity(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.identityType, "decentralized");
+  });
+
+  test("IdentityService routes did:wba: to decentralized provider", async () => {
+    const service = new IdentityService();
+    service.registerProvider(new DidWebIdentityProvider(tmpDir));
+
+    const identity = await service.createIdentity({
+      type: "decentralized",
+      did: "did:wba:example.com:federation:node",
+    } as any);
+
+    const loaded = await service.loadIdentity(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.identityType, "decentralized");
+  });
+
+  test("Broker creates token with DID:web identity", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "decentralized",
+      did: "did:web:agents.example.com:broker-test",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "didweb-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    assert.ok(token.persistentIdentity);
+    assert.strictEqual(token.persistentIdentity!.persistentId, "did:web:agents.example.com:broker-test");
+    assert.strictEqual(token.persistentIdentity!.identityType, "decentralized");
+    assert.ok(token.persistentIdentity!.proof);
+    assert.ok(token.persistentIdentity!.publicKey);
+    assert.ok(token.persistentIdentity!.publicKeyJwk);
+  });
+
+  test("Broker verifies DID:web identity token", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "decentralized",
+      did: "did:web:agents.example.com:verifiable",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "didweb-verified", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+
+  test("DID:web identity verifies standalone (no broker)", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "decentralized",
+      did: "did:web:agents.example.com:standalone",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "didweb-standalone", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, "did:web:agents.example.com:standalone");
+  });
+
+  test("DID:web identity inherits through delegation", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "decentralized",
+      did: "did:web:example.com:agents:parent",
+    } as any);
+
+    const parent = await broker.createRootTokenWithIdentity(
+      { agentId: "parent", scopes: ["github:repo:read", "github:repo:write"] },
+      identity.persistentId
+    );
+
+    const child = broker.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+    });
+
+    assert.ok(child.persistentIdentity);
+    assert.strictEqual(child.persistentIdentity!.persistentId, identity.persistentId);
+    assert.strictEqual(child.persistentIdentity!.identityType, "decentralized");
+  });
+
+  test("DID:web token works with VC endorsements", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "decentralized",
+      did: "did:web:agents.example.com:endorsed",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "endorsed-didweb", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const authorityKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const vc = createVcEndorsement(
+      "did:web:trust-authority.com",
+      authorityKeypair.privateKey,
+      authorityKeypair.publicKey,
+      identity.persistentId,
+      "cross-org-verified"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:trust-authority.com": authorityKeypair.publicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "cross-org-verified");
   });
 });
