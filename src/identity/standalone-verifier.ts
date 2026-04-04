@@ -14,17 +14,23 @@
  *      - DID:key (did:key:z6Mk...): decode DID to extract raw key, compare with token's public key
  *      - Legacy (key:{fingerprint}): verify SHA-256 fingerprint matches public key
  *   3. Verify the proof was signed by the corresponding private key
- *   4. Optionally verify authority endorsements
+ *   4. Optionally verify endorsements (both VC and legacy formats)
  *
  * Trust model:
  *   - Self-signed (TOFU): "this is the same agent I've seen before"
  *     → Verified by: public key matches persistentId + valid proof
  *   - Authority-endorsed: "a trusted party vouches for this agent"
- *     → Verified by: authority's signature over agent's public key + claim
+ *     → Verified by: authority's signature over agent's identity + claim
  */
 
 import * as crypto from "crypto";
-import type { AgentToken, AuthorityEndorsement } from "../types.js";
+import type {
+  AgentToken,
+  AuthorityEndorsement,
+  VerifiableCredential,
+  Endorsement,
+} from "../types.js";
+import { isVerifiableCredential } from "../types.js";
 import {
   isDidKey,
   isLegacyKeyId,
@@ -32,6 +38,7 @@ import {
   rawPublicKeyToPem,
   computeLegacyFingerprint,
 } from "./did-key.js";
+import { canonicalize } from "./jcs.js";
 
 /** Result of standalone identity verification */
 export interface StandaloneVerificationResult {
@@ -60,6 +67,7 @@ export interface VerifiedEndorsement {
  * No broker access required — works anywhere.
  *
  * Supports both DID:key (did:key:z6Mk...) and legacy (key:{fingerprint}) formats.
+ * Supports both VC-format and legacy AuthorityEndorsement formats for endorsements.
  *
  * @param token - The agent token containing persistentIdentity
  * @param options - Optional verification settings
@@ -99,7 +107,6 @@ export function verifyIdentityProof(
   }
 
   // 3. Verify the persistentId matches the public key
-  //    This prevents an attacker from substituting a different public key
   if (requireFingerprintMatch && identityType === "keypair") {
     const matchResult = verifyKeyMatch(persistentId, publicKey);
     if (!matchResult.valid) {
@@ -127,8 +134,6 @@ export function verifyIdentityProof(
       };
     }
   } else {
-    // Platform (HMAC) identities cannot be verified without the broker's secret.
-    // This is a fundamental limitation of symmetric crypto — the verifier needs the same secret.
     return {
       valid: false,
       error: `Identity type "${identityType}" cannot be verified standalone — ` +
@@ -138,24 +143,31 @@ export function verifyIdentityProof(
     };
   }
 
-  // 5. Verify authority endorsements (if any, and if trusted authorities provided)
+  // 5. Verify endorsements (both VC and legacy formats)
   const verifiedEndorsements: VerifiedEndorsement[] = [];
 
   if (token.persistentIdentity.endorsements && options?.trustedAuthorities) {
     for (const endorsement of token.persistentIdentity.endorsements) {
-      const verified = verifyEndorsement(
-        endorsement,
-        persistentId,
-        publicKey,
-        options.trustedAuthorities
-      );
+      const verified = isVerifiableCredential(endorsement)
+        ? verifyVcEndorsement(endorsement, options.trustedAuthorities)
+        : verifyLegacyEndorsement(endorsement, persistentId, publicKey, options.trustedAuthorities);
+
       if (verified) {
-        verifiedEndorsements.push({
-          authorityId: endorsement.authorityId,
-          claim: endorsement.claim,
-          issuedAt: endorsement.issuedAt,
-          expiresAt: endorsement.expiresAt,
-        });
+        if (isVerifiableCredential(endorsement)) {
+          verifiedEndorsements.push({
+            authorityId: endorsement.issuer.id,
+            claim: endorsement.credentialSubject.claim,
+            issuedAt: endorsement.issuanceDate,
+            expiresAt: endorsement.expirationDate,
+          });
+        } else {
+          verifiedEndorsements.push({
+            authorityId: endorsement.authorityId,
+            claim: endorsement.claim,
+            issuedAt: endorsement.issuedAt,
+            expiresAt: endorsement.expiresAt,
+          });
+        }
       }
     }
   }
@@ -177,16 +189,11 @@ function verifyKeyMatch(
   publicKeyPem: string
 ): StandaloneVerificationResult {
   if (isDidKey(persistentId)) {
-    // DID:key: decode the DID to get the raw public key, convert to PEM, compare
     try {
       const rawKeyFromDid = didKeyToRawPublicKey(persistentId);
       const pemFromDid = rawPublicKeyToPem(rawKeyFromDid);
 
-      // Normalize both PEMs for comparison (strip whitespace differences)
-      const normalizedFromDid = pemFromDid.trim();
-      const normalizedFromToken = publicKeyPem.trim();
-
-      if (normalizedFromDid !== normalizedFromToken) {
+      if (pemFromDid.trim() !== publicKeyPem.trim()) {
         return {
           valid: false,
           error: `Public key mismatch: key does not match DID:key identity ${persistentId}`,
@@ -199,7 +206,6 @@ function verifyKeyMatch(
       };
     }
   } else if (isLegacyKeyId(persistentId)) {
-    // Legacy format: verify SHA-256 fingerprint
     const expectedFingerprint = computeLegacyFingerprint(publicKeyPem);
     const expectedId = `key:${expectedFingerprint}`;
 
@@ -219,17 +225,111 @@ function verifyKeyMatch(
   return { valid: true };
 }
 
+// ─────────────────────────────────────────────────────────────────
+// VC-FORMAT ENDORSEMENT CREATION AND VERIFICATION
+// ─────────────────────────────────────────────────────────────────
+
 /**
- * Create an authority endorsement — signs the agent's public key + claim.
- * Called by the authority (not the agent).
+ * Compute the canonical signing payload for a VC-format endorsement.
+ * Uses JCS (RFC 8785) canonicalization of the credential's core fields.
+ */
+export function computeVcSigningPayload(
+  issuer: VerifiableCredential["issuer"],
+  credentialSubject: VerifiableCredential["credentialSubject"],
+  issuanceDate: string,
+  expirationDate?: string,
+): string {
+  const payload: Record<string, unknown> = {
+    issuer,
+    credentialSubject,
+    issuanceDate,
+  };
+  if (expirationDate !== undefined) {
+    payload.expirationDate = expirationDate;
+  }
+  return canonicalize(payload);
+}
+
+/**
+ * Create a W3C Verifiable Credential-format endorsement.
  *
- * @param authorityId - Identifier for this authority
- * @param authorityPrivateKey - Authority's Ed25519 private key (PEM)
- * @param authorityPublicKey - Authority's Ed25519 public key (PEM)
- * @param agentPersistentId - The agent's persistent ID
- * @param agentPublicKey - The agent's public key (PEM)
- * @param claim - What the authority is attesting (e.g., "member-of:acme-org")
- * @param expiresAt - Optional expiry for the endorsement
+ * @param issuerId - Authority identifier (DID or URI)
+ * @param issuerPrivateKey - Authority's Ed25519 private key (PEM)
+ * @param issuerPublicKey - Authority's Ed25519 public key (PEM) — used to derive verificationMethod
+ * @param agentPersistentId - The agent's persistent ID (e.g., "did:key:z6Mk...")
+ * @param claim - What is being attested
+ * @param options - Optional fields (issuerName, expirationDate, verificationMethod)
+ */
+export function createVcEndorsement(
+  issuerId: string,
+  issuerPrivateKey: string,
+  issuerPublicKey: string,
+  agentPersistentId: string,
+  claim: string,
+  options?: {
+    issuerName?: string;
+    expirationDate?: string;
+    verificationMethod?: string;
+  }
+): VerifiableCredential {
+  if (!issuerId) throw new Error("issuerId is required");
+  if (!issuerPrivateKey) throw new Error("issuerPrivateKey is required");
+  if (!agentPersistentId) throw new Error("agentPersistentId is required");
+  if (!claim) throw new Error("claim is required");
+
+  const issuanceDate = new Date().toISOString();
+
+  const issuer: VerifiableCredential["issuer"] = { id: issuerId };
+  if (options?.issuerName) {
+    issuer.name = options.issuerName;
+  }
+
+  const credentialSubject = {
+    id: agentPersistentId,
+    claim,
+  };
+
+  // Compute canonical signing payload via JCS
+  const signingPayload = computeVcSigningPayload(
+    issuer,
+    credentialSubject,
+    issuanceDate,
+    options?.expirationDate,
+  );
+
+  let proofValue: string;
+  try {
+    const privateKeyObj = crypto.createPrivateKey(issuerPrivateKey);
+    const signature = crypto.sign(null, Buffer.from(signingPayload), privateKeyObj);
+    proofValue = signature.toString("base64url");
+  } catch (err) {
+    throw new Error(
+      `Failed to sign VC endorsement: invalid issuer private key. ` +
+      `(${err instanceof Error ? err.message : String(err)})`
+    );
+  }
+
+  // Default verificationMethod: use issuer's DID key ID or fall back to issuerId
+  const verificationMethod = options?.verificationMethod ?? `${issuerId}#key-1`;
+
+  return {
+    type: "VerifiableCredential",
+    issuer,
+    issuanceDate,
+    expirationDate: options?.expirationDate,
+    credentialSubject,
+    proof: {
+      type: "Ed25519Signature2020",
+      verificationMethod,
+      created: issuanceDate,
+      proofValue,
+    },
+  };
+}
+
+/**
+ * Create a legacy-format authority endorsement.
+ * Preserved for backward compatibility.
  */
 export function createEndorsement(
   authorityId: string,
@@ -240,7 +340,6 @@ export function createEndorsement(
   claim: string,
   expiresAt?: string
 ): AuthorityEndorsement {
-  // Validate inputs
   if (!authorityId) throw new Error("authorityId is required");
   if (!authorityPrivateKey) throw new Error("authorityPrivateKey is required");
   if (!authorityPublicKey) throw new Error("authorityPublicKey is required");
@@ -248,8 +347,6 @@ export function createEndorsement(
   if (!agentPublicKey) throw new Error("agentPublicKey is required");
   if (!claim) throw new Error("claim is required");
 
-  // The signed payload: persistentId + publicKey + claim
-  // This binds the endorsement to a specific agent identity and claim
   const payload = `${agentPersistentId}\n${agentPublicKey}\n${claim}`;
 
   let signature: Buffer;
@@ -274,33 +371,63 @@ export function createEndorsement(
 }
 
 /**
- * Verify a single endorsement.
- * Checks that a trusted authority signed this agent's identity + claim.
+ * Verify a VC-format endorsement.
+ * Reconstructs the JCS canonical payload and verifies the proof signature.
  */
-function verifyEndorsement(
+function verifyVcEndorsement(
+  vc: VerifiableCredential,
+  trustedAuthorities: Record<string, string>
+): boolean {
+  // Look up trusted key by issuer.id
+  const trustedKey = trustedAuthorities[vc.issuer.id];
+  if (!trustedKey) {
+    return false;
+  }
+
+  // Check expiration
+  if (vc.expirationDate && new Date(vc.expirationDate) < new Date()) {
+    return false;
+  }
+
+  // Reconstruct the signed payload
+  const signingPayload = computeVcSigningPayload(
+    vc.issuer,
+    vc.credentialSubject,
+    vc.issuanceDate,
+    vc.expirationDate,
+  );
+
+  try {
+    const pubKeyObj = crypto.createPublicKey(trustedKey);
+    const signatureBuffer = Buffer.from(vc.proof.proofValue, "base64url");
+    return crypto.verify(null, Buffer.from(signingPayload), pubKeyObj, signatureBuffer);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify a legacy-format authority endorsement.
+ */
+function verifyLegacyEndorsement(
   endorsement: AuthorityEndorsement,
   agentPersistentId: string,
   agentPublicKey: string,
   trustedAuthorities: Record<string, string>
 ): boolean {
-  // Check if we trust this authority
   const trustedKey = trustedAuthorities[endorsement.authorityId];
   if (!trustedKey) {
-    return false; // Unknown authority
+    return false;
   }
 
-  // Check endorsement hasn't expired
   if (endorsement.expiresAt && new Date(endorsement.expiresAt) < new Date()) {
     return false;
   }
 
-  // Verify the authority's public key matches what we trust
-  // (prevents an attacker from substituting a different authority key)
   if (endorsement.authorityPublicKey !== trustedKey) {
     return false;
   }
 
-  // Reconstruct the signed payload and verify
   const payload = `${agentPersistentId}\n${agentPublicKey}\n${endorsement.claim}`;
 
   try {

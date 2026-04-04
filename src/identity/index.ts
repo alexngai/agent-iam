@@ -13,6 +13,8 @@ export { PlatformIdentityProvider } from "./platform-provider.js";
 export {
   verifyIdentityProof,
   createEndorsement,
+  createVcEndorsement,
+  computeVcSigningPayload,
 } from "./standalone-verifier.js";
 export type {
   StandaloneVerificationResult,
@@ -32,6 +34,9 @@ export {
   base58btcDecode,
 } from "./did-key.js";
 
+// JCS canonicalization
+export { canonicalize } from "./jcs.js";
+
 export type {
   IdentityType,
   PersistentIdentity,
@@ -48,4 +53,12 @@ export type {
 } from "./types.js";
 
 // Re-export token-level types related to identity
-export type { AuthorityEndorsement } from "../types.js";
+export type {
+  AuthorityEndorsement,
+  VerifiableCredential,
+  Endorsement,
+} from "../types.js";
+export {
+  isVerifiableCredential,
+  isLegacyEndorsement,
+} from "../types.js";

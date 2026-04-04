@@ -1382,6 +1382,9 @@ import {
   base58btcEncode,
   base58btcDecode,
 } from "./did-key.js";
+import { createVcEndorsement, computeVcSigningPayload } from "./standalone-verifier.js";
+import { canonicalize } from "./jcs.js";
+import { isVerifiableCredential, isLegacyEndorsement } from "../types.js";
 
 describe("DID:key encoding/decoding", () => {
   test("base58btc round-trip", () => {
@@ -1783,5 +1786,355 @@ describe("DID:key standalone verification", () => {
     } finally {
       fs.rmSync(tmpDir2, { recursive: true, force: true });
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// JCS CANONICALIZATION (RFC 8785)
+// ─────────────────────────────────────────────────────────────────
+
+describe("JCS canonicalization", () => {
+  test("sorts object keys lexicographically", () => {
+    const result = canonicalize({ z: 1, a: 2, m: 3 });
+    assert.strictEqual(result, '{"a":2,"m":3,"z":1}');
+  });
+
+  test("handles nested objects", () => {
+    const result = canonicalize({ b: { z: 1, a: 2 }, a: "hello" });
+    assert.strictEqual(result, '{"a":"hello","b":{"a":2,"z":1}}');
+  });
+
+  test("handles arrays (preserves order)", () => {
+    const result = canonicalize({ items: [3, 1, 2] });
+    assert.strictEqual(result, '{"items":[3,1,2]}');
+  });
+
+  test("handles null", () => {
+    assert.strictEqual(canonicalize(null), "null");
+  });
+
+  test("handles booleans", () => {
+    assert.strictEqual(canonicalize(true), "true");
+    assert.strictEqual(canonicalize(false), "false");
+  });
+
+  test("handles strings with special characters", () => {
+    assert.strictEqual(canonicalize("hello\nworld"), '"hello\\nworld"');
+  });
+
+  test("omits undefined values", () => {
+    const result = canonicalize({ a: 1, b: undefined, c: 3 });
+    assert.strictEqual(result, '{"a":1,"c":3}');
+  });
+
+  test("deterministic: same input always same output", () => {
+    const obj = { issuer: { id: "did:key:z6Mk123" }, claim: "test" };
+    const r1 = canonicalize(obj);
+    const r2 = canonicalize(obj);
+    assert.strictEqual(r1, r2);
+  });
+
+  test("rejects Infinity and NaN", () => {
+    assert.throws(() => canonicalize(Infinity), /Infinity/);
+    assert.throws(() => canonicalize(NaN), /NaN/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// VC-FORMAT ENDORSEMENTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("VC-format endorsements", () => {
+  let tmpDir: string;
+  let broker: Broker;
+  let authorityPrivateKey: string;
+  let authorityPublicKey: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-vc-"));
+    broker = new Broker(tmpDir);
+
+    const keypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    authorityPrivateKey = keypair.privateKey;
+    authorityPublicKey = keypair.publicKey;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("createVcEndorsement produces valid VC structure", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "member-of:acme-engineering",
+      { issuerName: "Acme Corp" }
+    );
+
+    assert.strictEqual(vc.type, "VerifiableCredential");
+    assert.strictEqual(vc.issuer.id, "did:web:acme-corp.com");
+    assert.strictEqual(vc.issuer.name, "Acme Corp");
+    assert.strictEqual(vc.credentialSubject.id, identity.persistentId);
+    assert.strictEqual(vc.credentialSubject.claim, "member-of:acme-engineering");
+    assert.strictEqual(vc.proof.type, "Ed25519Signature2020");
+    assert.ok(vc.proof.proofValue);
+    assert.ok(vc.issuanceDate);
+    assert.strictEqual(vc.expirationDate, undefined);
+  });
+
+  test("createVcEndorsement with expiration date", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const expiry = new Date(Date.now() + 86400000).toISOString();
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "certified",
+      { expirationDate: expiry }
+    );
+
+    assert.strictEqual(vc.expirationDate, expiry);
+  });
+
+  test("VC endorsement verifies via standalone verifier", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "vc-endorsed-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "member-of:acme-engineering"
+    );
+
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].authorityId, "did:web:acme-corp.com");
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "member-of:acme-engineering");
+  });
+
+  test("VC endorsement from untrusted issuer is ignored", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const vc = createVcEndorsement(
+      "did:web:untrusted.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "some-claim"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("expired VC endorsement is not verified", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "expired-claim",
+      { expirationDate: new Date(Date.now() - 1000).toISOString() }
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("VC endorsement with forged signature is rejected", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Create endorsement with a different private key
+    const fakeKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const vc = createVcEndorsement(
+      "did:web:acme-corp.com",
+      fakeKeypair.privateKey,
+      fakeKeypair.publicKey,
+      identity.persistentId,
+      "forged-claim"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    // Trust the real authority key, not the forger's
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:acme-corp.com": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("type guards distinguish VC from legacy endorsements", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const legacyEndorsement = createEndorsement(
+      "legacy-authority",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "legacy-claim"
+    );
+
+    const vcEndorsement = createVcEndorsement(
+      "did:web:modern-authority.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "vc-claim"
+    );
+
+    assert.strictEqual(isLegacyEndorsement(legacyEndorsement), true);
+    assert.strictEqual(isVerifiableCredential(legacyEndorsement), false);
+    assert.strictEqual(isVerifiableCredential(vcEndorsement), true);
+    assert.strictEqual(isLegacyEndorsement(vcEndorsement), false);
+  });
+
+  test("mixed legacy and VC endorsements on same token", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "mixed-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const legacyEndorsement = createEndorsement(
+      "legacy-corp",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "legacy-claim"
+    );
+
+    const vcEndorsement = createVcEndorsement(
+      "did:web:modern-corp.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "modern-claim"
+    );
+
+    token.persistentIdentity!.endorsements = [legacyEndorsement, vcEndorsement];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: {
+        "legacy-corp": authorityPublicKey,
+        "did:web:modern-corp.com": authorityPublicKey,
+      },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 2);
+
+    const claims = result.verifiedEndorsements!.map(e => e.claim).sort();
+    assert.deepStrictEqual(claims, ["legacy-claim", "modern-claim"]);
+  });
+
+  test("createVcEndorsement throws on empty issuerId", () => {
+    assert.throws(
+      () => createVcEndorsement("", "key", "key", "id", "claim"),
+      /issuerId is required/
+    );
+  });
+
+  test("createVcEndorsement throws on invalid private key", () => {
+    assert.throws(
+      () => createVcEndorsement("did:web:x.com", "bad-key", "key", "id", "claim"),
+      /invalid issuer private key/
+    );
+  });
+
+  test("VC signing payload is deterministic via JCS", async () => {
+    const issuer = { id: "did:web:acme.com", name: "Acme" };
+    const subject = { id: "did:key:z6MkTest", claim: "test-claim" };
+    const date = "2025-01-01T00:00:00.000Z";
+
+    const payload1 = computeVcSigningPayload(issuer, subject, date);
+    const payload2 = computeVcSigningPayload(issuer, subject, date);
+
+    assert.strictEqual(payload1, payload2);
+    // Should be sorted by keys
+    assert.ok(payload1.includes('"credentialSubject"'));
+    assert.ok(payload1.includes('"issuanceDate"'));
+    assert.ok(payload1.includes('"issuer"'));
+  });
+
+  test("VC serialization round-trip preserves all fields", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+
+    const vc = createVcEndorsement(
+      "did:web:acme.com",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      "test-claim",
+      {
+        issuerName: "Acme Corp",
+        expirationDate: new Date(Date.now() + 86400000).toISOString(),
+      }
+    );
+
+    const serialized = JSON.stringify(vc);
+    const deserialized = JSON.parse(serialized);
+
+    assert.strictEqual(deserialized.type, "VerifiableCredential");
+    assert.strictEqual(deserialized.issuer.id, "did:web:acme.com");
+    assert.strictEqual(deserialized.issuer.name, "Acme Corp");
+    assert.strictEqual(deserialized.credentialSubject.id, identity.persistentId);
+    assert.strictEqual(deserialized.credentialSubject.claim, "test-claim");
+    assert.ok(deserialized.expirationDate);
+    assert.ok(deserialized.proof.proofValue);
   });
 });

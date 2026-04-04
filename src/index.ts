@@ -70,6 +70,13 @@ export type {
   FederationMetadata,
   AgentCapabilities,
   AuthorityEndorsement,
+  VerifiableCredential,
+  Endorsement,
+} from "./types.js";
+
+export {
+  isVerifiableCredential,
+  isLegacyEndorsement,
 } from "./types.js";
 
 // Persistent identity
@@ -79,6 +86,9 @@ export {
   PlatformIdentityProvider,
   verifyIdentityProof,
   createEndorsement,
+  createVcEndorsement,
+  computeVcSigningPayload,
+  canonicalize,
 } from "./identity/index.js";
 export type {
   IdentityType,
