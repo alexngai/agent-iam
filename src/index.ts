@@ -69,6 +69,7 @@ export type {
   FederatedIdentity,
   FederationMetadata,
   AgentCapabilities,
+  AuthorityEndorsement,
 } from "./types.js";
 
 // Persistent identity
@@ -76,6 +77,8 @@ export {
   IdentityService,
   KeypairIdentityProvider,
   PlatformIdentityProvider,
+  verifyIdentityProof,
+  createEndorsement,
 } from "./identity/index.js";
 export type {
   IdentityType,
@@ -84,6 +87,8 @@ export type {
   IdentityProvider,
   CreateIdentityOptions,
   IdentityServiceConfig,
+  StandaloneVerificationResult,
+  VerifiedEndorsement,
   TrustClaimType,
   TrustAttestation,
   TrustScore,

@@ -10,6 +10,14 @@ export type { IdentityServiceConfig } from "./identity-service.js";
 
 export { KeypairIdentityProvider } from "./keypair-provider.js";
 export { PlatformIdentityProvider } from "./platform-provider.js";
+export {
+  verifyIdentityProof,
+  createEndorsement,
+} from "./standalone-verifier.js";
+export type {
+  StandaloneVerificationResult,
+  VerifiedEndorsement,
+} from "./standalone-verifier.js";
 
 export type {
   IdentityType,

@@ -547,27 +547,162 @@ interface AgentResource {
 
 ---
 
+## Self-Certifying Verification & Authority Endorsements
+
+### The Problem: Remote Verification Without Broker Access
+
+A key scenario: an agent runs locally with a local broker, but needs to prove its identity to a remote online service. The service has no access to the broker.
+
+### Solution: Self-Certifying Tokens
+
+The token carries everything needed for verification:
+
+```
+Token.persistentIdentity = {
+  persistentId: "key:abc123...",           // Fingerprint of public key
+  identityType: "keypair",
+  publicKey: "-----BEGIN PUBLIC KEY-----\n...",  // Full public key (PEM)
+  challenge: "agent-id:timestamp:nonce",   // What was signed
+  proof: "base64url-ed25519-signature",    // Ed25519 signature over challenge
+  endorsements?: [...]                     // Optional authority endorsements
+}
+```
+
+A remote verifier checks three things:
+1. **Fingerprint match**: SHA-256(publicKey) == persistentId → the key matches the claimed identity
+2. **Proof verification**: Ed25519.verify(challenge, proof, publicKey) → the creator held the private key
+3. **Endorsements** (optional): authority signatures over (persistentId + publicKey + claim)
+
+No broker access needed. No network call. Pure cryptographic verification.
+
+### Trust Model: TOFU + Progressive Endorsement
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        TRUST PROGRESSION                             │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  Day 1: Self-Signed (TOFU)                                           │
+│  ┌─────────────────────────────────┐                                 │
+│  │ Agent presents token            │  Trust: "I've seen this key     │
+│  │ Service verifies Ed25519 proof  │         before" (low)           │
+│  │ Service stores publicKey        │                                 │
+│  └─────────────────────────────────┘                                 │
+│                                                                       │
+│  Day 30: Behavioral Trust                                            │
+│  ┌─────────────────────────────────┐                                 │
+│  │ Same key, 100 interactions      │  Trust: "This agent is          │
+│  │ Service recognizes publicKey    │         reliable" (accumulated) │
+│  └─────────────────────────────────┘                                 │
+│                                                                       │
+│  Day 45: Authority-Endorsed                                          │
+│  ┌─────────────────────────────────┐                                 │
+│  │ Token now includes endorsement  │  Trust: "Reliable AND vouched   │
+│  │ from "acme-corp" signing the    │         for by Acme" (high)     │
+│  │ agent's public key + claim      │                                 │
+│  └─────────────────────────────────┘                                 │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Authority Endorsements
+
+An endorsement is an authority's Ed25519 signature over `(persistentId + publicKey + claim)`:
+
+```typescript
+interface AuthorityEndorsement {
+  authorityId: string;           // "acme-corp"
+  authorityPublicKey: string;    // Authority's Ed25519 public key
+  claim: string;                 // "member-of:acme-engineering"
+  signature: string;             // Ed25519 sign(persistentId + publicKey + claim)
+  issuedAt: string;
+  expiresAt?: string;
+}
+```
+
+Verification:
+- The remote service has a set of trusted authority public keys
+- For each endorsement, check: `authorityPublicKey ∈ trustedAuthorities` AND `Ed25519.verify(payload, signature, authorityPublicKey)`
+- Untrusted/expired endorsements are silently ignored (identity is still valid via self-signed)
+
+### Symmetric vs Asymmetric Identity
+
+| Property | Keypair (Ed25519) | Platform (HMAC) |
+|---|---|---|
+| **Standalone verification** | Yes — public key in token | No — needs broker's shared secret |
+| **Remote verification** | Yes — anyone with public key | No — only broker can verify |
+| **Key management** | Agent owns private key | Broker owns shared secret |
+| **Best for** | Cross-system, remote services | Local/internal, broker-mediated |
+
+Platform (HMAC) identities intentionally cannot be verified standalone — this is a fundamental property of symmetric cryptography. For remote verification scenarios, keypair identities are required.
+
+### Standalone Verifier API
+
+```typescript
+import { verifyIdentityProof, createEndorsement } from "agent-iam";
+
+// Remote service verifies agent identity (no broker needed)
+const result = verifyIdentityProof(token, {
+  trustedAuthorities: {
+    "acme-corp": acmePublicKeyPem,
+  },
+});
+
+if (result.valid) {
+  console.log(`Agent: ${result.persistentId}`);
+  console.log(`Public key: ${result.publicKey}`);
+  console.log(`Endorsements: ${result.verifiedEndorsements}`);
+}
+
+// Authority creates an endorsement for an agent
+const endorsement = createEndorsement(
+  "acme-corp",
+  authorityPrivateKey,
+  authorityPublicKey,
+  agentPersistentId,
+  agentPublicKey,
+  "member-of:acme-engineering",
+  "2027-01-01T00:00:00Z" // optional expiry
+);
+```
+
+---
+
 ## Implementation Phases
 
-### Phase 1: Core Identity Layer
+### Phase 1: Core Identity Layer ✅
 - `PersistentIdentity` type and `IdentityProvider` interface
-- `KeypairIdentityProvider` (standalone-friendly, simplest to build)
+- `KeypairIdentityProvider` (Ed25519, file-backed, standalone-friendly)
+- `PlatformIdentityProvider` (HMAC, registry-backed, team/enterprise)
+- `IdentityService` orchestrator with pluggable providers
 - `persistentIdentity` field on `AgentToken`
-- Token creation/refresh preserves identity binding
+- Token creation/delegation/refresh preserves identity binding
 
-### Phase 2: Trust Accumulation
-- `TrustAttestation` and `TrustStore` interfaces
+### Phase 2: Proof-of-Possession ✅
+- `createRootTokenWithIdentity()` calls `prove()` and embeds cryptographic proof
+- `verifyTokenIdentity()` on broker verifies proof against identity provider
+- Impersonation prevention via Ed25519 signature / HMAC verification
+
+### Phase 3: Self-Certifying Verification ✅
+- Public key embedded in token for brokerless verification
+- `verifyIdentityProof()` standalone function — pure crypto, no broker needed
+- Fingerprint check: public key hash must match claimed persistentId
+- Authority endorsement creation and verification
+- TOFU support for remote services
+
+### Phase 4: Trust Accumulation (future)
+- `TrustAttestation` and `TrustStore` interfaces (types defined)
 - Local file-based trust store
 - Basic trust scoring
 
-### Phase 3: Resource Binding
-- `AgentResourceRegistry` interface
+### Phase 5: Resource Binding (future)
+- `AgentResourceRegistry` interface (types defined)
 - Memory store and skill registry bindings
 - Cross-session resource continuity
 
-### Phase 4: Additional Providers
-- `PlatformIdentityProvider` (for distributed mode)
-- `AttestedIdentityProvider` (for cloud deployments)
+### Phase 6: Additional Providers (future)
+- `AttestedIdentityProvider` (SPIFFE-like, for cloud deployments)
+- `DecentralizedIdentityProvider` (DID-based, for cross-org)
 - Federation of identities across trust domains
 
 ---
@@ -585,3 +720,7 @@ interface AgentResource {
 5. **Multi-tenant identity**: In enterprise deployments, should an agent have one identity per tenant, or one global identity with per-tenant trust?
 
 6. **Identity and model updates**: When the underlying model is updated (Claude 3 → Claude 4), does the agent retain its identity? The "personality" has changed — is it still the same agent?
+
+7. **Key rotation**: How should an agent rotate its keypair while maintaining continuity of identity? Could the old key sign a "succession" endorsement for the new key?
+
+8. **Endorsement revocation**: If an authority revokes an endorsement, how do verifiers learn about it? CRL-like list? Short-lived endorsements that must be refreshed?

@@ -270,11 +270,16 @@ export class Broker {
    * Generates a challenge, proves identity ownership via the provider's
    * prove() method, and embeds the cryptographic proof in the token.
    *
-   * This is the proof-of-possession flow:
+   * The token is self-certifying: it includes the public key, so any
+   * remote service can verify the identity proof without broker access.
+   *
+   * Proof-of-possession flow:
    *   1. Generate challenge from agentId + nonce
-   *   2. Identity holder signs challenge (Ed25519 or HMAC depending on provider)
-   *   3. Proof embedded in token alongside the challenge
-   *   4. Verifier can later check: does this proof match the public key?
+   *   2. Load identity to get public key
+   *   3. Identity holder signs challenge (Ed25519 or HMAC depending on provider)
+   *   4. Public key + proof embedded in token
+   *   5. Any verifier can check: does this proof match this public key?
+   *      And: does this public key hash to the claimed persistentId?
    */
   async createRootTokenWithIdentity(
     params: CreateRootTokenParams,
@@ -283,10 +288,19 @@ export class Broker {
     // 1. Generate a challenge bound to this agent's token creation
     const challenge = this.identityService.generateChallenge(params.agentId);
 
-    // 2. Prove the caller controls the identity (Ed25519 sign or HMAC)
+    // 2. Load the identity to get the public key
+    const identity = await this.identityService.loadIdentity(persistentId);
+    if (!identity) {
+      throw new Error(`Identity not found: ${persistentId}`);
+    }
+
+    // 3. Prove the caller controls the identity (Ed25519 sign or HMAC)
     const identityProof = await this.identityService.proveIdentity(persistentId, challenge);
 
-    // 3. Embed the proof in the token — verifiers can check this independently
+    // 4. Extract public key from identity metadata
+    const publicKey = (identity.metadata.publicKey as string) ?? undefined;
+
+    // 5. Embed proof + public key in the token — self-certifying
     return this.tokenService.createRootToken({
       ...params,
       persistentIdentity: {
@@ -294,6 +308,7 @@ export class Broker {
         identityType: identityProof.identityType,
         challenge,
         proof: identityProof.proof,
+        publicKey,
       },
     });
   }

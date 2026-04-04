@@ -203,7 +203,43 @@ export interface AgentToken {
     proof?: string;
     /** The challenge that was signed for the proof */
     challenge?: string;
+    /**
+     * Public key (PEM or JWK) for self-certifying verification.
+     * When present, anyone can verify the identity proof without
+     * access to the broker or identity provider.
+     * The persistentId is derived from this key (fingerprint),
+     * so the verifier can confirm the key matches the claimed identity.
+     */
+    publicKey?: string;
+    /**
+     * Authority endorsements on this identity (optional).
+     * Each endorsement is a signature from a trusted authority over
+     * the agent's public key, attesting to some claim about the agent.
+     * Verifiers who trust the authority can use these for stronger
+     * trust than TOFU alone.
+     */
+    endorsements?: AuthorityEndorsement[];
   };
+}
+
+/**
+ * An authority's endorsement (signature) over an agent's public key.
+ * Follows the X.509/VC pattern: a trusted party signs the agent's
+ * public key + claims, and anyone who trusts that party can verify.
+ */
+export interface AuthorityEndorsement {
+  /** Identifier of the authority (e.g., "acme-corp", "platform:broker-1") */
+  authorityId: string;
+  /** The authority's public key (PEM) for verifying this endorsement */
+  authorityPublicKey: string;
+  /** What the authority is attesting (e.g., "member-of:acme-org", "vetted-agent") */
+  claim: string;
+  /** Authority's signature over: persistentId + publicKey + claim */
+  signature: string;
+  /** When the endorsement was issued (ISO 8601) */
+  issuedAt: string;
+  /** When the endorsement expires (ISO 8601, optional) */
+  expiresAt?: string;
 }
 
 /** Request to delegate capabilities to a child agent */
@@ -260,6 +296,8 @@ export interface DelegationRequest {
     identityType: string;
     proof?: string;
     challenge?: string;
+    publicKey?: string;
+    endorsements?: AuthorityEndorsement[];
   };
 }
 
@@ -302,6 +340,8 @@ export interface CreateRootTokenParams {
     identityType: string;
     proof?: string;
     challenge?: string;
+    publicKey?: string;
+    endorsements?: AuthorityEndorsement[];
   };
 }
 

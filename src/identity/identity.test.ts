@@ -4,6 +4,7 @@
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import * as assert from "node:assert";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -714,5 +715,345 @@ describe("Proof-of-possession via Broker", () => {
     const result = await broker.verifyTokenIdentity(child);
     assert.strictEqual(result.valid, true);
     assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// STANDALONE VERIFICATION (no broker required)
+// ─────────────────────────────────────────────────────────────────
+
+import { verifyIdentityProof, createEndorsement } from "./standalone-verifier.js";
+
+describe("Standalone identity verification (no broker)", () => {
+  let tmpDir: string;
+  let broker: Broker;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-standalone-"));
+    broker = new Broker(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("verifies keypair identity using only token data", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "remote-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Verify without broker — this is what a remote service would do
+    const result = verifyIdentityProof(token);
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+    assert.ok(result.publicKey);
+  });
+
+  test("token includes public key for remote verification", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    assert.ok(token.persistentIdentity!.publicKey);
+    assert.ok(token.persistentIdentity!.publicKey!.includes("BEGIN PUBLIC KEY"));
+  });
+
+  test("rejects token with no persistent identity", () => {
+    const token = broker.createRootToken({
+      agentId: "anon",
+      scopes: ["github:repo:read"],
+    });
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+    assert.ok(result.error!.includes("no persistent identity"));
+  });
+
+  test("rejects token with no public key (platform identity)", async () => {
+    // Platform identities use HMAC — no public key to verify standalone
+    const identity = await broker.createIdentity({ type: "platform" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "platform-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+    // Platform identity has no public key in metadata, so it fails with no publicKey
+  });
+
+  test("rejects token with mismatched public key (impersonation attempt)", async () => {
+    const realIdentity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      realIdentity.persistentId
+    );
+
+    // Attacker generates a different keypair and substitutes it
+    const { publicKey: fakeKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    token.persistentIdentity!.publicKey = fakeKey;
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+    assert.ok(result.error!.includes("fingerprint mismatch"));
+  });
+
+  test("rejects token with tampered proof", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Tamper with the proof (note: standalone verifier checks the Ed25519 sig,
+    // not the HMAC, so this tests a different layer)
+    const proofBytes = Buffer.from(token.persistentIdentity!.proof!, "base64url");
+    proofBytes[0] ^= 0xff; // Flip bits
+    token.persistentIdentity!.proof = proofBytes.toString("base64url");
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+    assert.ok(result.error!.includes("invalid"));
+  });
+
+  test("same identity verifies consistently across multiple tokens", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+
+    const token1 = await broker.createRootTokenWithIdentity(
+      { agentId: "agent-session-1", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+    const token2 = await broker.createRootTokenWithIdentity(
+      { agentId: "agent-session-2", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result1 = verifyIdentityProof(token1);
+    const result2 = verifyIdentityProof(token2);
+
+    assert.strictEqual(result1.valid, true);
+    assert.strictEqual(result2.valid, true);
+    // Same identity across sessions
+    assert.strictEqual(result1.persistentId, result2.persistentId);
+    assert.strictEqual(result1.publicKey, result2.publicKey);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// AUTHORITY ENDORSEMENTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("Authority endorsements", () => {
+  let tmpDir: string;
+  let broker: Broker;
+  let authorityPrivateKey: string;
+  let authorityPublicKey: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-endorse-"));
+    broker = new Broker(tmpDir);
+
+    // Generate an authority keypair
+    const keypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    authorityPrivateKey = keypair.privateKey;
+    authorityPublicKey = keypair.publicKey;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("authority can endorse an agent identity", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "endorsed-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Authority endorses the agent
+    const endorsement = createEndorsement(
+      "acme-corp",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "member-of:acme-engineering"
+    );
+
+    // Attach endorsement to token
+    token.persistentIdentity!.endorsements = [endorsement];
+
+    // Verify with the authority's public key as trusted
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "acme-corp": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].authorityId, "acme-corp");
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "member-of:acme-engineering");
+  });
+
+  test("endorsement from untrusted authority is ignored", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const endorsement = createEndorsement(
+      "unknown-corp",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "some-claim"
+    );
+    token.persistentIdentity!.endorsements = [endorsement];
+
+    // Don't include "unknown-corp" in trusted authorities
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "other-corp": authorityPublicKey },
+    });
+
+    // Identity itself is still valid, but no endorsements verified
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("endorsement with forged authority key is rejected", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Attacker generates a different authority key and creates endorsement
+    const fakeKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const fakeEndorsement = createEndorsement(
+      "acme-corp",
+      fakeKeypair.privateKey,
+      fakeKeypair.publicKey, // Fake authority's public key
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "member-of:acme-engineering"
+    );
+    token.persistentIdentity!.endorsements = [fakeEndorsement];
+
+    // Service trusts the real acme-corp key, not the fake one
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "acme-corp": authorityPublicKey },
+    });
+
+    // Identity valid, but endorsement rejected (wrong key)
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("expired endorsement is not verified", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const endorsement = createEndorsement(
+      "acme-corp",
+      authorityPrivateKey,
+      authorityPublicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "member-of:acme",
+      new Date(Date.now() - 1000).toISOString() // Already expired
+    );
+    token.persistentIdentity!.endorsements = [endorsement];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "acme-corp": authorityPublicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 0);
+  });
+
+  test("multiple endorsements from different authorities", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Second authority
+    const auth2 = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const endorsement1 = createEndorsement(
+      "acme-corp", authorityPrivateKey, authorityPublicKey,
+      identity.persistentId, token.persistentIdentity!.publicKey!,
+      "member-of:acme"
+    );
+    const endorsement2 = createEndorsement(
+      "security-auditor", auth2.privateKey, auth2.publicKey,
+      identity.persistentId, token.persistentIdentity!.publicKey!,
+      "security-vetted"
+    );
+    token.persistentIdentity!.endorsements = [endorsement1, endorsement2];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: {
+        "acme-corp": authorityPublicKey,
+        "security-auditor": auth2.publicKey,
+      },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 2);
+  });
+
+  test("TOFU flow: first contact then recognition", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "new-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // First contact: service has never seen this agent
+    const firstContact = verifyIdentityProof(token);
+    assert.strictEqual(firstContact.valid, true);
+    assert.strictEqual(firstContact.verifiedEndorsements!.length, 0);
+
+    // Service stores the public key (simulated)
+    const storedPublicKey = firstContact.publicKey;
+    const storedPersistentId = firstContact.persistentId;
+
+    // Second session: agent comes back with a new token, same identity
+    const token2 = await broker.createRootTokenWithIdentity(
+      { agentId: "returning-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const secondContact = verifyIdentityProof(token2);
+    assert.strictEqual(secondContact.valid, true);
+
+    // Service confirms it's the same agent
+    assert.strictEqual(secondContact.persistentId, storedPersistentId);
+    assert.strictEqual(secondContact.publicKey, storedPublicKey);
   });
 });
