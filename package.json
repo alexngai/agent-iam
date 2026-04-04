@@ -10,7 +10,12 @@
   "scripts": {
     "build": "tsc",
     "test": "node --test dist/**/*.test.js",
-    "cli": "node dist/cli.js"
+    "cli": "node dist/cli.js",
+    "prepublishOnly": "npm run build",
+    "version:patch": "npm version patch && git push && git push --tags",
+    "version:minor": "npm version minor && git push && git push --tags",
+    "version:major": "npm version major && git push && git push --tags",
+    "publish:npm": "npm run build && npm publish"
   },
   "keywords": [
     "agent",
