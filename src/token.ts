@@ -98,6 +98,8 @@ export class TokenService {
       ...(params.identity && { identity: params.identity }),
       ...(params.federation && { federation: params.federation }),
       ...(params.agentCapabilities && { agentCapabilities: params.agentCapabilities }),
+      // Persistent identity binding
+      ...(params.persistentIdentity && { persistentIdentity: params.persistentIdentity }),
     };
 
     const signature = sign(token, this.secret);
@@ -152,6 +154,11 @@ export class TokenService {
     const inheritIdentity = request.inheritIdentity ?? true;
     const childIdentity = inheritIdentity ? parent.identity : undefined;
 
+    // Handle persistent identity inheritance (default: inherit from parent)
+    const inheritPersistentIdentity = request.inheritPersistentIdentity ?? true;
+    const childPersistentIdentity = request.persistentIdentity
+      ?? (inheritPersistentIdentity ? parent.persistentIdentity : undefined);
+
     // Handle federation (attenuate: can only be equal or more restrictive)
     const childFederation = this.mergeFederation(parent.federation, request.federation);
 
@@ -175,6 +182,8 @@ export class TokenService {
       ...(childIdentity && { identity: childIdentity }),
       ...(childFederation && { federation: childFederation }),
       ...(childCapabilities && { agentCapabilities: childCapabilities }),
+      // Persistent identity (inherited or overridden)
+      ...(childPersistentIdentity && { persistentIdentity: childPersistentIdentity }),
     };
 
     const signature = sign(child, this.secret);
@@ -287,6 +296,8 @@ export class TokenService {
       ...(token.identity && { identity: token.identity }),
       ...(token.federation && { federation: token.federation }),
       ...(token.agentCapabilities && { agentCapabilities: token.agentCapabilities }),
+      // Preserve persistent identity
+      ...(token.persistentIdentity && { persistentIdentity: token.persistentIdentity }),
     };
 
     const signature = sign(refreshed, this.secret);

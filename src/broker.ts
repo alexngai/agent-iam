@@ -21,6 +21,12 @@ import { GoogleProvider } from "./providers/google.js";
 import { AWSProvider } from "./providers/aws.js";
 import { APIKeyProvider } from "./providers/apikey.js";
 import { SlackProvider } from "./providers/slack.js";
+import {
+  IdentityService,
+  KeypairIdentityProvider,
+  PlatformIdentityProvider,
+} from "./identity/index.js";
+import type { PersistentIdentity, IdentityType } from "./identity/index.js";
 
 /** Credential cache entry */
 interface CacheEntry {
@@ -39,6 +45,7 @@ export interface BrokerStatus {
 export class Broker {
   private tokenService: TokenService;
   private configService: ConfigService;
+  private identityService: IdentityService;
   private credentialCache: Map<string, CacheEntry> = new Map();
 
   /** Cache buffer - evict credentials this many ms before expiry */
@@ -48,6 +55,12 @@ export class Broker {
     this.configService = new ConfigService(configDir);
     const secret = this.configService.getOrCreateSecret();
     this.tokenService = new TokenService(secret);
+
+    // Initialize identity service with default providers
+    this.identityService = new IdentityService();
+    const cfgDir = this.configService.getConfigDir();
+    this.identityService.registerProvider(new KeypairIdentityProvider(cfgDir));
+    this.identityService.registerProvider(new PlatformIdentityProvider(cfgDir));
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -163,6 +176,66 @@ export class Broker {
 
     // Create refreshed token with same capabilities but new expiry
     return this.tokenService.createRefreshedToken(token, newExpiresAt);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // IDENTITY OPERATIONS
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new persistent identity for an agent.
+   */
+  async createIdentity(
+    options?: { label?: string; type?: IdentityType }
+  ): Promise<PersistentIdentity> {
+    return this.identityService.createIdentity(options);
+  }
+
+  /**
+   * Load a persistent identity by its ID.
+   */
+  async loadIdentity(persistentId: string): Promise<PersistentIdentity | null> {
+    return this.identityService.loadIdentity(persistentId);
+  }
+
+  /**
+   * List all persistent identities.
+   */
+  async listIdentities(): Promise<PersistentIdentity[]> {
+    return this.identityService.listIdentities();
+  }
+
+  /**
+   * Revoke a persistent identity.
+   */
+  async revokeIdentity(persistentId: string): Promise<void> {
+    return this.identityService.revokeIdentity(persistentId);
+  }
+
+  /**
+   * Create a root token bound to a persistent identity.
+   * Generates an identity proof and embeds it in the token.
+   */
+  createRootTokenWithIdentity(
+    params: Parameters<typeof this.tokenService.createRootToken>[0],
+    persistentId: string
+  ): AgentToken {
+    const challenge = this.identityService.generateChallenge(params.agentId);
+    return this.tokenService.createRootToken({
+      ...params,
+      persistentIdentity: {
+        persistentId,
+        identityType: persistentId.split(":")[0],
+        challenge,
+      },
+    });
+  }
+
+  /**
+   * Get the identity service for direct access to providers.
+   */
+  getIdentityService(): IdentityService {
+    return this.identityService;
   }
 
   // ─────────────────────────────────────────────────────────────────

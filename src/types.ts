@@ -183,6 +183,27 @@ export interface AgentToken {
    * Separate from scope-based resource access.
    */
   agentCapabilities?: AgentCapabilities;
+
+  // ==========================================================================
+  // Persistent Identity (optional — links token to a cross-session identity)
+  // ==========================================================================
+
+  /**
+   * Persistent identity binding (optional)
+   * Links this token to a persistent agent identity that survives across sessions.
+   * Identity ("who you are") is separate from capability ("what you can do").
+   * When present, inherited through delegation chain by default.
+   */
+  persistentIdentity?: {
+    /** Stable identifier across sessions (e.g., "key:abc...", "platform:uuid") */
+    persistentId: string;
+    /** How this identity was established */
+    identityType: string;
+    /** Cryptographic proof binding this identity to the token */
+    proof?: string;
+    /** The challenge that was signed for the proof */
+    challenge?: string;
+  };
 }
 
 /** Request to delegate capabilities to a child agent */
@@ -221,6 +242,25 @@ export interface DelegationRequest {
    * Can only be equal or more restrictive than parent.
    */
   federation?: Partial<FederationMetadata>;
+
+  /**
+   * Whether to inherit parent's persistent identity (default: true)
+   * When true, child token carries parent's persistent identity binding.
+   * When false, persistent identity is cleared.
+   */
+  inheritPersistentIdentity?: boolean;
+
+  /**
+   * Override persistent identity for the child (optional)
+   * If provided, the child gets its own persistent identity instead of
+   * inheriting from the parent. Useful when sub-agents have their own identity.
+   */
+  persistentIdentity?: {
+    persistentId: string;
+    identityType: string;
+    proof?: string;
+    challenge?: string;
+  };
 }
 
 /**
@@ -251,6 +291,18 @@ export interface CreateRootTokenParams {
   federation?: FederationMetadata;
   /** Agent-level capabilities (optional) - spawn, message, etc. */
   agentCapabilities?: AgentCapabilities;
+
+  // ==========================================================================
+  // Persistent Identity
+  // ==========================================================================
+
+  /** Persistent identity to bind to this token */
+  persistentIdentity?: {
+    persistentId: string;
+    identityType: string;
+    proof?: string;
+    challenge?: string;
+  };
 }
 
 /** Result of token verification */

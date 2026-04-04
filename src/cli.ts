@@ -202,6 +202,101 @@ apikeyCmd
   });
 
 // ─────────────────────────────────────────────────────────────────
+// IDENTITY COMMANDS
+// ─────────────────────────────────────────────────────────────────
+
+const identityCmd = program.command("identity").description("Manage persistent agent identities");
+
+identityCmd
+  .command("create")
+  .description("Create a new persistent identity")
+  .option("--type <type>", "Identity type: keypair or platform", "keypair")
+  .option("--label <label>", "Human-readable label for this identity")
+  .action(async (options) => {
+    const broker = new Broker();
+
+    try {
+      const identity = await broker.createIdentity({
+        type: options.type,
+        label: options.label,
+      });
+
+      console.log(`Identity created: ${identity.persistentId}`);
+      console.log(JSON.stringify(identity, null, 2));
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+identityCmd
+  .command("list")
+  .description("List all persistent identities")
+  .action(async () => {
+    const broker = new Broker();
+
+    try {
+      const identities = await broker.listIdentities();
+
+      if (identities.length === 0) {
+        console.log("No identities found");
+      } else {
+        console.log(`Found ${identities.length} identit${identities.length === 1 ? "y" : "ies"}:`);
+        for (const id of identities) {
+          const label = id.label ? ` (${id.label})` : "";
+          console.log(`  ${id.persistentId}${label} [${id.identityType}] created ${id.createdAt}`);
+        }
+      }
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+identityCmd
+  .command("show <persistentId>")
+  .description("Show details of a persistent identity")
+  .action(async (persistentId) => {
+    const broker = new Broker();
+
+    try {
+      const identity = await broker.loadIdentity(persistentId);
+      if (!identity) {
+        console.error(`Identity not found: ${persistentId}`);
+        process.exit(1);
+      }
+
+      console.log(JSON.stringify(identity, null, 2));
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+identityCmd
+  .command("revoke <persistentId>")
+  .description("Revoke a persistent identity")
+  .action(async (persistentId) => {
+    const broker = new Broker();
+
+    try {
+      await broker.revokeIdentity(persistentId);
+      console.log(`Identity revoked: ${persistentId}`);
+    } catch (error) {
+      console.error(
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      process.exit(1);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
 // TOKEN COMMANDS
 // ─────────────────────────────────────────────────────────────────
 
@@ -216,6 +311,7 @@ tokenCmd
   .option("--ttl-days <days>", "Token TTL in days", "7")
   .option("--max-depth <depth>", "Maximum delegation depth", "3")
   .option("--no-delegatable", "Disable delegation")
+  .option("--identity <persistentId>", "Bind token to a persistent identity")
   .action((options) => {
     const broker = new Broker();
 
@@ -225,14 +321,29 @@ tokenCmd
         ? JSON.parse(options.constraints)
         : {};
 
-      const token = broker.createRootToken({
-        agentId: options.agentId,
-        scopes,
-        constraints,
-        delegatable: options.delegatable,
-        maxDelegationDepth: parseInt(options.maxDepth, 10),
-        ttlDays: parseInt(options.ttlDays, 10),
-      });
+      let token;
+      if (options.identity) {
+        token = broker.createRootTokenWithIdentity(
+          {
+            agentId: options.agentId,
+            scopes,
+            constraints,
+            delegatable: options.delegatable,
+            maxDelegationDepth: parseInt(options.maxDepth, 10),
+            ttlDays: parseInt(options.ttlDays, 10),
+          },
+          options.identity
+        );
+      } else {
+        token = broker.createRootToken({
+          agentId: options.agentId,
+          scopes,
+          constraints,
+          delegatable: options.delegatable,
+          maxDelegationDepth: parseInt(options.maxDepth, 10),
+          ttlDays: parseInt(options.ttlDays, 10),
+        });
+      }
 
       const serialized = broker.serializeToken(token);
       console.log(serialized);

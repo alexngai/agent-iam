@@ -49,6 +49,9 @@ export interface RuntimeStatus {
   refreshEnabled: boolean;
   timeUntilExpiry?: number;
   canRefresh: boolean;
+  /** Persistent identity bound to this agent (if any) */
+  persistentId?: string;
+  persistentIdentityType?: string;
 }
 
 /**
@@ -177,6 +180,13 @@ export class AgentRuntime {
   }
 
   /**
+   * Get the persistent identity bound to this agent's token (if any).
+   */
+  getPersistentId(): string | undefined {
+    return this.token.persistentIdentity?.persistentId;
+  }
+
+  /**
    * Get runtime status
    */
   getStatus(): RuntimeStatus {
@@ -191,6 +201,8 @@ export class AgentRuntime {
       refreshEnabled: !!this.refreshTimer,
       timeUntilExpiry,
       canRefresh: this.canRefresh(),
+      persistentId: this.token.persistentIdentity?.persistentId,
+      persistentIdentityType: this.token.persistentIdentity?.identityType,
     };
   }
 

@@ -70,3 +70,25 @@ export type {
   FederationMetadata,
   AgentCapabilities,
 } from "./types.js";
+
+// Persistent identity
+export {
+  IdentityService,
+  KeypairIdentityProvider,
+  PlatformIdentityProvider,
+} from "./identity/index.js";
+export type {
+  IdentityType,
+  PersistentIdentity,
+  IdentityProof,
+  IdentityProvider,
+  CreateIdentityOptions,
+  IdentityServiceConfig,
+  TrustClaimType,
+  TrustAttestation,
+  TrustScore,
+  TrustStore,
+  AgentResourceType,
+  AgentResource,
+  AgentResourceRegistry,
+} from "./identity/index.js";
