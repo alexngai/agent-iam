@@ -195,7 +195,7 @@ export interface AgentToken {
    * When present, inherited through delegation chain by default.
    */
   persistentIdentity?: {
-    /** Stable identifier across sessions (e.g., "key:abc...", "platform:uuid") */
+    /** Stable identifier across sessions (e.g., "did:key:z6Mk...", "platform:uuid") */
     persistentId: string;
     /** How this identity was established */
     identityType: string;
@@ -204,13 +204,19 @@ export interface AgentToken {
     /** The challenge that was signed for the proof */
     challenge?: string;
     /**
-     * Public key (PEM or JWK) for self-certifying verification.
+     * Public key (PEM) for self-certifying verification.
      * When present, anyone can verify the identity proof without
      * access to the broker or identity provider.
-     * The persistentId is derived from this key (fingerprint),
-     * so the verifier can confirm the key matches the claimed identity.
+     * For DID:key identities, the persistentId encodes the public key directly.
+     * For legacy key: identities, the persistentId is derived from this key's fingerprint.
      */
     publicKey?: string;
+    /**
+     * Public key in JWK format for VC/DID ecosystem interoperability.
+     * For Ed25519: { kty: "OKP", crv: "Ed25519", x: "<base64url-raw-key>" }
+     * Both PEM and JWK can coexist — PEM for Node.js crypto, JWK for standards interop.
+     */
+    publicKeyJwk?: JsonWebKey;
     /**
      * Authority endorsements on this identity (optional).
      * Each endorsement is a signature from a trusted authority over
@@ -297,6 +303,7 @@ export interface DelegationRequest {
     proof?: string;
     challenge?: string;
     publicKey?: string;
+    publicKeyJwk?: JsonWebKey;
     endorsements?: AuthorityEndorsement[];
   };
 }
@@ -341,6 +348,7 @@ export interface CreateRootTokenParams {
     proof?: string;
     challenge?: string;
     publicKey?: string;
+    publicKeyJwk?: JsonWebKey;
     endorsements?: AuthorityEndorsement[];
   };
 }

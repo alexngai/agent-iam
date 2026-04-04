@@ -19,6 +19,19 @@ export type {
   VerifiedEndorsement,
 } from "./standalone-verifier.js";
 
+// DID:key utilities
+export {
+  publicKeyToDidKey,
+  didKeyToRawPublicKey,
+  rawPublicKeyToPem,
+  publicKeyToJwk,
+  jwkToPem,
+  isDidKey,
+  isLegacyKeyId,
+  base58btcEncode,
+  base58btcDecode,
+} from "./did-key.js";
+
 export type {
   IdentityType,
   PersistentIdentity,

@@ -2,13 +2,15 @@
  * Keypair Identity Provider
  *
  * SSH/GPG-like approach: agent generates an Ed25519 keypair on first creation.
- * The private key is stored locally, the public key fingerprint becomes the
- * persistent identity. Best for standalone / local-first deployments.
+ * The private key is stored locally, the public key becomes the persistent identity.
+ *
+ * New identities use DID:key format (did:key:z6Mk...) per W3C DID:key method.
+ * Legacy key:{fingerprint} identities are still supported for backward compatibility.
  *
  * Storage layout:
  *   {identityDir}/
- *     {persistentId}.json   — PersistentIdentity metadata + public key
- *     {persistentId}.key    — Private key (PEM, mode 0o600)
+ *     {storageKey}.json   — PersistentIdentity metadata + public key
+ *     {storageKey}.key    — Private key (PEM, mode 0o600)
  */
 
 import * as crypto from "crypto";
@@ -20,6 +22,15 @@ import type {
   IdentityProvider,
   CreateIdentityOptions,
 } from "./types.js";
+import {
+  publicKeyToDidKey,
+  didKeyToRawPublicKey,
+  rawPublicKeyToPem,
+  publicKeyToJwk,
+  isDidKey,
+  isLegacyKeyId,
+  computeLegacyFingerprint,
+} from "./did-key.js";
 
 /** Directory name within config dir for identity storage */
 const IDENTITIES_DIR = "identities";
@@ -41,13 +52,12 @@ export class KeypairIdentityProvider implements IdentityProvider {
       privateKeyEncoding: { type: "pkcs8", format: "pem" },
     });
 
-    // Derive persistent ID from public key fingerprint (SHA-256)
-    const fingerprint = crypto
-      .createHash("sha256")
-      .update(publicKey)
-      .digest("hex")
-      .slice(0, 32);
-    const persistentId = `key:${fingerprint}`;
+    // Generate DID:key identifier from public key
+    const persistentId = publicKeyToDidKey(publicKey);
+    const jwk = publicKeyToJwk(publicKey);
+
+    // Use legacy fingerprint as storage key (filesystem-safe)
+    const fingerprint = computeLegacyFingerprint(publicKey);
 
     const identity: PersistentIdentity = {
       persistentId,
@@ -56,6 +66,7 @@ export class KeypairIdentityProvider implements IdentityProvider {
       label: options?.label as string | undefined,
       metadata: {
         publicKey,
+        publicKeyJwk: jwk,
         algorithm: "ed25519",
         fingerprint,
       },
@@ -73,7 +84,7 @@ export class KeypairIdentityProvider implements IdentityProvider {
   }
 
   async load(persistentId: string): Promise<PersistentIdentity | null> {
-    const fingerprint = this.extractFingerprint(persistentId);
+    const fingerprint = this.resolveFingerprint(persistentId);
     if (!fingerprint) return null;
 
     const metaPath = path.join(this.identityDir, `${fingerprint}.json`);
@@ -104,7 +115,7 @@ export class KeypairIdentityProvider implements IdentityProvider {
   }
 
   async prove(persistentId: string, challenge: string): Promise<IdentityProof> {
-    const fingerprint = this.extractFingerprint(persistentId);
+    const fingerprint = this.resolveFingerprint(persistentId);
     if (!fingerprint) {
       throw new Error(`Invalid keypair identity: ${persistentId}`);
     }
@@ -158,9 +169,11 @@ export class KeypairIdentityProvider implements IdentityProvider {
   }
 
   async revoke(persistentId: string): Promise<void> {
-    const fingerprint = this.extractFingerprint(persistentId);
+    const fingerprint = this.resolveFingerprint(persistentId);
     if (!fingerprint) {
-      throw new Error(`Invalid keypair identity format: ${persistentId} (must start with "key:")`);
+      throw new Error(
+        `Invalid keypair identity format: ${persistentId} (must start with "did:key:" or "key:")`
+      );
     }
 
     const keyPath = path.join(this.identityDir, `${fingerprint}.key`);
@@ -187,10 +200,58 @@ export class KeypairIdentityProvider implements IdentityProvider {
     return (identity.metadata.publicKey as string) ?? null;
   }
 
-  private extractFingerprint(persistentId: string): string | null {
-    if (persistentId.startsWith("key:")) {
+  /**
+   * Migrate a legacy key:{fingerprint} identity to DID:key format.
+   * Rewrites the metadata file with the new persistentId while keeping
+   * the same key material and storage location.
+   *
+   * @returns The updated identity, or null if not found
+   */
+  async migrate(legacyPersistentId: string): Promise<PersistentIdentity | null> {
+    if (!isLegacyKeyId(legacyPersistentId)) {
+      throw new Error(`Not a legacy key: identity: ${legacyPersistentId}`);
+    }
+
+    const identity = await this.load(legacyPersistentId);
+    if (!identity) return null;
+
+    const publicKeyPem = identity.metadata.publicKey as string;
+    const newPersistentId = publicKeyToDidKey(publicKeyPem);
+    const jwk = publicKeyToJwk(publicKeyPem);
+
+    // Update identity with new DID:key format
+    identity.persistentId = newPersistentId;
+    identity.metadata.publicKeyJwk = jwk;
+
+    // Write back
+    const fingerprint = identity.metadata.fingerprint as string;
+    const metaPath = path.join(this.identityDir, `${fingerprint}.json`);
+    fs.writeFileSync(metaPath, JSON.stringify(identity, null, 2), { mode: 0o600 });
+
+    return identity;
+  }
+
+  /**
+   * Resolve a persistent ID (DID:key or legacy key:) to a storage fingerprint.
+   * For DID:key: decode the public key from the DID and compute the legacy fingerprint.
+   * For legacy key:: extract the fingerprint directly.
+   */
+  private resolveFingerprint(persistentId: string): string | null {
+    if (isLegacyKeyId(persistentId)) {
       return persistentId.slice(4);
     }
+
+    if (isDidKey(persistentId)) {
+      try {
+        // Decode DID:key to raw public key, convert to PEM, compute fingerprint
+        const rawKey = didKeyToRawPublicKey(persistentId);
+        const pem = rawPublicKeyToPem(rawKey);
+        return computeLegacyFingerprint(pem);
+      } catch {
+        return null;
+      }
+    }
+
     return null;
   }
 

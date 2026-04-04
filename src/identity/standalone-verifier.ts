@@ -10,19 +10,28 @@
  *
  * Verification flow:
  *   1. Extract public key and proof from token
- *   2. Verify persistentId matches the public key (fingerprint check)
+ *   2. Verify persistentId matches the public key:
+ *      - DID:key (did:key:z6Mk...): decode DID to extract raw key, compare with token's public key
+ *      - Legacy (key:{fingerprint}): verify SHA-256 fingerprint matches public key
  *   3. Verify the proof was signed by the corresponding private key
  *   4. Optionally verify authority endorsements
  *
  * Trust model:
  *   - Self-signed (TOFU): "this is the same agent I've seen before"
- *     → Verified by: public key fingerprint matches persistentId + valid proof
+ *     → Verified by: public key matches persistentId + valid proof
  *   - Authority-endorsed: "a trusted party vouches for this agent"
  *     → Verified by: authority's signature over agent's public key + claim
  */
 
 import * as crypto from "crypto";
 import type { AgentToken, AuthorityEndorsement } from "../types.js";
+import {
+  isDidKey,
+  isLegacyKeyId,
+  didKeyToRawPublicKey,
+  rawPublicKeyToPem,
+  computeLegacyFingerprint,
+} from "./did-key.js";
 
 /** Result of standalone identity verification */
 export interface StandaloneVerificationResult {
@@ -50,6 +59,8 @@ export interface VerifiedEndorsement {
  * Verify an agent's identity using only the data in the token.
  * No broker access required — works anywhere.
  *
+ * Supports both DID:key (did:key:z6Mk...) and legacy (key:{fingerprint}) formats.
+ *
  * @param token - The agent token containing persistentIdentity
  * @param options - Optional verification settings
  * @returns Verification result with persistentId and verified endorsements
@@ -59,7 +70,7 @@ export function verifyIdentityProof(
   options?: {
     /** Trusted authority public keys (authorityId → PEM). Only endorsements from these are verified. */
     trustedAuthorities?: Record<string, string>;
-    /** Whether to require the persistentId to match the public key fingerprint (default: true) */
+    /** Whether to require the persistentId to match the public key (default: true) */
     requireFingerprintMatch?: boolean;
   }
 ): StandaloneVerificationResult {
@@ -87,21 +98,12 @@ export function verifyIdentityProof(
     };
   }
 
-  // 3. Verify the persistentId matches the public key fingerprint
+  // 3. Verify the persistentId matches the public key
   //    This prevents an attacker from substituting a different public key
   if (requireFingerprintMatch && identityType === "keypair") {
-    const expectedFingerprint = crypto
-      .createHash("sha256")
-      .update(publicKey)
-      .digest("hex")
-      .slice(0, 32);
-    const expectedId = `key:${expectedFingerprint}`;
-
-    if (persistentId !== expectedId) {
-      return {
-        valid: false,
-        error: `Public key fingerprint mismatch: key does not match claimed identity ${persistentId}`,
-      };
+    const matchResult = verifyKeyMatch(persistentId, publicKey);
+    if (!matchResult.valid) {
+      return matchResult;
     }
   }
 
@@ -164,6 +166,57 @@ export function verifyIdentityProof(
     publicKey,
     verifiedEndorsements,
   };
+}
+
+/**
+ * Verify that a persistentId matches the given public key.
+ * Supports both DID:key and legacy key:{fingerprint} formats.
+ */
+function verifyKeyMatch(
+  persistentId: string,
+  publicKeyPem: string
+): StandaloneVerificationResult {
+  if (isDidKey(persistentId)) {
+    // DID:key: decode the DID to get the raw public key, convert to PEM, compare
+    try {
+      const rawKeyFromDid = didKeyToRawPublicKey(persistentId);
+      const pemFromDid = rawPublicKeyToPem(rawKeyFromDid);
+
+      // Normalize both PEMs for comparison (strip whitespace differences)
+      const normalizedFromDid = pemFromDid.trim();
+      const normalizedFromToken = publicKeyPem.trim();
+
+      if (normalizedFromDid !== normalizedFromToken) {
+        return {
+          valid: false,
+          error: `Public key mismatch: key does not match DID:key identity ${persistentId}`,
+        };
+      }
+    } catch (err) {
+      return {
+        valid: false,
+        error: `Invalid DID:key format: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  } else if (isLegacyKeyId(persistentId)) {
+    // Legacy format: verify SHA-256 fingerprint
+    const expectedFingerprint = computeLegacyFingerprint(publicKeyPem);
+    const expectedId = `key:${expectedFingerprint}`;
+
+    if (persistentId !== expectedId) {
+      return {
+        valid: false,
+        error: `Public key fingerprint mismatch: key does not match claimed identity ${persistentId}`,
+      };
+    }
+  } else {
+    return {
+      valid: false,
+      error: `Unknown keypair identity format: ${persistentId} (expected "did:key:" or "key:")`,
+    };
+  }
+
+  return { valid: true };
 }
 
 /**

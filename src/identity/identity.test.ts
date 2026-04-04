@@ -29,13 +29,14 @@ describe("KeypairIdentityProvider", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test("creates a keypair identity with key: prefix", async () => {
+  test("creates a keypair identity with did:key: prefix", async () => {
     const identity = await provider.create({ label: "test-agent" });
 
-    assert.ok(identity.persistentId.startsWith("key:"));
+    assert.ok(identity.persistentId.startsWith("did:key:z6Mk"), `Expected did:key:z6Mk prefix, got: ${identity.persistentId}`);
     assert.strictEqual(identity.identityType, "keypair");
     assert.strictEqual(identity.label, "test-agent");
     assert.ok(identity.metadata.publicKey);
+    assert.ok(identity.metadata.publicKeyJwk);
     assert.strictEqual(identity.metadata.algorithm, "ed25519");
     assert.ok(identity.createdAt);
   });
@@ -108,7 +109,7 @@ describe("KeypairIdentityProvider", () => {
     assert.strictEqual(loaded, null);
 
     // Verify key file is gone
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
     const keyPath = path.join(tmpDir, "identities", `${fingerprint}.key`);
     assert.strictEqual(fs.existsSync(keyPath), false);
   });
@@ -278,7 +279,7 @@ describe("IdentityService", () => {
 
   test("creates identity with default type", async () => {
     const identity = await service.createIdentity({ label: "default" });
-    assert.ok(identity.persistentId.startsWith("key:"));
+    assert.ok(identity.persistentId.startsWith("did:key:z6Mk"), `Expected did:key:z6Mk prefix, got: ${identity.persistentId}`);
   });
 
   test("creates identity with explicit type", async () => {
@@ -803,7 +804,7 @@ describe("Standalone identity verification (no broker)", () => {
 
     const result = verifyIdentityProof(token);
     assert.strictEqual(result.valid, false);
-    assert.ok(result.error!.includes("fingerprint mismatch"));
+    assert.ok(result.error!.includes("mismatch"), `Expected mismatch error, got: ${result.error}`);
   });
 
   test("rejects token with tampered proof", async () => {
@@ -1091,7 +1092,7 @@ describe("Error handling and edge cases", () => {
   test("keypair prove() with corrupted private key gives clear error", async () => {
     const provider = new KeypairIdentityProvider(tmpDir);
     const identity = await provider.create();
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
 
     // Corrupt the private key file
     const keyPath = path.join(tmpDir, "identities", `${fingerprint}.key`);
@@ -1114,7 +1115,7 @@ describe("Error handling and edge cases", () => {
     const proof = await provider.prove(identity.persistentId, challenge);
 
     // Corrupt the metadata file's public key
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
     const metaPath = path.join(tmpDir, "identities", `${fingerprint}.json`);
     const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
     meta.metadata.publicKey = "not a valid PEM";
@@ -1129,7 +1130,7 @@ describe("Error handling and edge cases", () => {
 
     await assert.rejects(
       () => provider.revoke("invalid-id"),
-      /must start with "key:"/
+      /must start with "did:key:" or "key:"/
     );
   });
 
@@ -1138,7 +1139,7 @@ describe("Error handling and edge cases", () => {
     const identity = await provider.create();
 
     // Manually delete the key files
-    const fingerprint = identity.persistentId.slice(4);
+    const fingerprint = identity.metadata.fingerprint as string;
     fs.unlinkSync(path.join(tmpDir, "identities", `${fingerprint}.key`));
     fs.unlinkSync(path.join(tmpDir, "identities", `${fingerprint}.json`));
 
@@ -1363,5 +1364,424 @@ describe("Error handling and edge cases", () => {
     assert.ok(refreshed.persistentIdentity!.publicKey);
     assert.ok(refreshed.persistentIdentity!.proof);
     assert.strictEqual(refreshed.expiresAt, newExpiry);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// DID:KEY AND JWK SUPPORT
+// ─────────────────────────────────────────────────────────────────
+
+import {
+  publicKeyToDidKey,
+  didKeyToRawPublicKey,
+  rawPublicKeyToPem,
+  publicKeyToJwk,
+  jwkToPem,
+  isDidKey,
+  isLegacyKeyId,
+  base58btcEncode,
+  base58btcDecode,
+} from "./did-key.js";
+
+describe("DID:key encoding/decoding", () => {
+  test("base58btc round-trip", () => {
+    const original = crypto.randomBytes(34);
+    const encoded = base58btcEncode(original);
+    const decoded = base58btcDecode(encoded);
+    assert.deepStrictEqual(decoded, original);
+  });
+
+  test("base58btc handles leading zeros", () => {
+    const bytes = Buffer.from([0, 0, 0, 1, 2, 3]);
+    const encoded = base58btcEncode(bytes);
+    assert.ok(encoded.startsWith("111")); // Three leading 1s for three zero bytes
+    const decoded = base58btcDecode(encoded);
+    assert.deepStrictEqual(decoded, bytes);
+  });
+
+  test("base58btc rejects invalid characters", () => {
+    assert.throws(() => base58btcDecode("invalid0OIl"), /Invalid base58btc character/);
+  });
+
+  test("publicKeyToDidKey produces valid DID:key format", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const did = publicKeyToDidKey(publicKey);
+    assert.ok(did.startsWith("did:key:z6Mk"), `Expected did:key:z6Mk prefix, got: ${did}`);
+    assert.ok(isDidKey(did));
+    assert.ok(!isLegacyKeyId(did));
+  });
+
+  test("DID:key round-trip: encode then decode recovers the same public key", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const did = publicKeyToDidKey(publicKey);
+    const rawKey = didKeyToRawPublicKey(did);
+    const recoveredPem = rawPublicKeyToPem(rawKey);
+
+    assert.strictEqual(recoveredPem.trim(), publicKey.trim());
+  });
+
+  test("didKeyToRawPublicKey rejects invalid DID prefix", () => {
+    assert.throws(() => didKeyToRawPublicKey("did:web:example.com"), /must start with "did:key:z"/);
+  });
+
+  test("didKeyToRawPublicKey rejects wrong multicodec prefix", () => {
+    // Encode with wrong prefix (0x1234 instead of 0xed01)
+    const fakeKey = Buffer.concat([Buffer.from([0x12, 0x34]), crypto.randomBytes(32)]);
+    const fakeDidKey = `did:key:z${base58btcEncode(fakeKey)}`;
+    assert.throws(() => didKeyToRawPublicKey(fakeDidKey), /Invalid multicodec prefix/);
+  });
+
+  test("same key always produces the same DID:key", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const did1 = publicKeyToDidKey(publicKey);
+    const did2 = publicKeyToDidKey(publicKey);
+    assert.strictEqual(did1, did2);
+  });
+
+  test("different keys produce different DID:keys", () => {
+    const key1 = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const key2 = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    assert.notStrictEqual(publicKeyToDidKey(key1.publicKey), publicKeyToDidKey(key2.publicKey));
+  });
+});
+
+describe("JWK support", () => {
+  test("publicKeyToJwk produces valid Ed25519 JWK", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const jwk = publicKeyToJwk(publicKey);
+    assert.strictEqual(jwk.kty, "OKP");
+    assert.strictEqual(jwk.crv, "Ed25519");
+    assert.ok(jwk.x, "JWK should have x parameter");
+    // x should be base64url-encoded 32 bytes
+    const xBytes = Buffer.from(jwk.x as string, "base64url");
+    assert.strictEqual(xBytes.length, 32);
+  });
+
+  test("JWK round-trip: PEM → JWK → PEM", () => {
+    const { publicKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const jwk = publicKeyToJwk(publicKey);
+    const recoveredPem = jwkToPem(jwk);
+    assert.strictEqual(recoveredPem.trim(), publicKey.trim());
+  });
+
+  test("token includes publicKeyJwk when created via broker", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-jwk-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "jwk-agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      assert.ok(token.persistentIdentity!.publicKeyJwk, "Token should have publicKeyJwk");
+      assert.strictEqual(token.persistentIdentity!.publicKeyJwk!.kty, "OKP");
+      assert.strictEqual(token.persistentIdentity!.publicKeyJwk!.crv, "Ed25519");
+
+      // JWK and PEM should represent the same key
+      const pemFromJwk = jwkToPem(token.persistentIdentity!.publicKeyJwk!);
+      assert.strictEqual(pemFromJwk.trim(), token.persistentIdentity!.publicKey!.trim());
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("DID:key migration", () => {
+  test("migrates legacy key: identity to did:key: format", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-migrate-"));
+    try {
+      const provider = new KeypairIdentityProvider(tmpDir2);
+
+      // Manually create a legacy-format identity
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const fingerprint = crypto
+        .createHash("sha256")
+        .update(publicKey)
+        .digest("hex")
+        .slice(0, 32);
+      const legacyId = `key:${fingerprint}`;
+
+      const identityDir = path.join(tmpDir2, "identities");
+      fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        path.join(identityDir, `${fingerprint}.key`),
+        privateKey,
+        { mode: 0o600 }
+      );
+      fs.writeFileSync(
+        path.join(identityDir, `${fingerprint}.json`),
+        JSON.stringify({
+          persistentId: legacyId,
+          identityType: "keypair",
+          createdAt: new Date().toISOString(),
+          metadata: { publicKey, algorithm: "ed25519", fingerprint },
+        }),
+        { mode: 0o600 }
+      );
+
+      // Verify legacy identity loads
+      const legacy = await provider.load(legacyId);
+      assert.ok(legacy);
+      assert.strictEqual(legacy!.persistentId, legacyId);
+
+      // Migrate
+      const migrated = await provider.migrate(legacyId);
+      assert.ok(migrated);
+      assert.ok(migrated!.persistentId.startsWith("did:key:z6Mk"));
+      assert.ok(migrated!.metadata.publicKeyJwk, "Migration should add JWK");
+
+      // Load using new DID:key ID
+      const loaded = await provider.load(migrated!.persistentId);
+      assert.ok(loaded);
+      assert.strictEqual(loaded!.persistentId, migrated!.persistentId);
+
+      // Prove/verify still works with new ID
+      const challenge = "migration-test-challenge";
+      const proof = await provider.prove(migrated!.persistentId, challenge);
+      const valid = await provider.verify(proof, challenge);
+      assert.strictEqual(valid, true);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("migrate() rejects non-legacy IDs", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-migrate-"));
+    try {
+      const provider = new KeypairIdentityProvider(tmpDir2);
+      await assert.rejects(
+        () => provider.migrate("did:key:z6MkInvalid"),
+        /Not a legacy key: identity/
+      );
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Backward compatibility — legacy key: format", () => {
+  test("legacy key: identities can still be loaded and proven", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-compat-"));
+    try {
+      const provider = new KeypairIdentityProvider(tmpDir2);
+
+      // Create a legacy-format identity on disk
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const fingerprint = crypto
+        .createHash("sha256")
+        .update(publicKey)
+        .digest("hex")
+        .slice(0, 32);
+      const legacyId = `key:${fingerprint}`;
+
+      const identityDir = path.join(tmpDir2, "identities");
+      fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(identityDir, `${fingerprint}.key`), privateKey, { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(identityDir, `${fingerprint}.json`),
+        JSON.stringify({
+          persistentId: legacyId,
+          identityType: "keypair",
+          createdAt: new Date().toISOString(),
+          metadata: { publicKey, algorithm: "ed25519", fingerprint },
+        }),
+        { mode: 0o600 }
+      );
+
+      // Load, prove, verify with legacy ID
+      const loaded = await provider.load(legacyId);
+      assert.ok(loaded);
+      assert.strictEqual(loaded!.persistentId, legacyId);
+
+      const challenge = "legacy-compat-challenge";
+      const proof = await provider.prove(legacyId, challenge);
+      const valid = await provider.verify(proof, challenge);
+      assert.strictEqual(valid, true);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("standalone verifier accepts legacy key: tokens", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-compat-"));
+    try {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const fingerprint = crypto
+        .createHash("sha256")
+        .update(publicKey)
+        .digest("hex")
+        .slice(0, 32);
+      const legacyId = `key:${fingerprint}`;
+      const challenge = "legacy-standalone-challenge";
+
+      const privateKeyObj = crypto.createPrivateKey(privateKey);
+      const proof = crypto.sign(null, Buffer.from(challenge), privateKeyObj).toString("base64url");
+
+      // Build a token with legacy key: format
+      const token = {
+        agentId: "legacy-agent",
+        scopes: ["github:repo:read"],
+        constraints: {},
+        delegatable: true,
+        maxDelegationDepth: 3,
+        currentDepth: 0,
+        persistentIdentity: {
+          persistentId: legacyId,
+          identityType: "keypair",
+          proof,
+          challenge,
+          publicKey,
+        },
+      } as any;
+
+      const result = verifyIdentityProof(token);
+      assert.strictEqual(result.valid, true);
+      assert.strictEqual(result.persistentId, legacyId);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("IdentityService.inferType routes did:key: to keypair provider", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-infer-"));
+    try {
+      const service = new IdentityService({ defaultType: "keypair" });
+      const provider = new KeypairIdentityProvider(tmpDir2);
+      service.registerProvider(provider);
+
+      const identity = await service.createIdentity({ type: "keypair" });
+      assert.ok(identity.persistentId.startsWith("did:key:"));
+
+      // Load via IdentityService should route to keypair provider
+      const loaded = await service.loadIdentity(identity.persistentId);
+      assert.ok(loaded);
+      assert.strictEqual(loaded!.persistentId, identity.persistentId);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("DID:key standalone verification", () => {
+  test("verifies DID:key identity using only token data", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didverify-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "did-agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      assert.ok(token.persistentIdentity!.persistentId.startsWith("did:key:"));
+
+      const result = verifyIdentityProof(token);
+      assert.strictEqual(result.valid, true);
+      assert.strictEqual(result.persistentId, identity.persistentId);
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects DID:key token with substituted public key", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didverify-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      // Substitute a different public key
+      const { publicKey: fakeKey } = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+      token.persistentIdentity!.publicKey = fakeKey;
+
+      const result = verifyIdentityProof(token);
+      assert.strictEqual(result.valid, false);
+      assert.ok(result.error!.includes("mismatch"));
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
+  });
+
+  test("endorsements work with DID:key identities", async () => {
+    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-didendorse-"));
+    try {
+      const broker = new Broker(tmpDir2);
+      const identity = await broker.createIdentity({ type: "keypair" });
+      const token = await broker.createRootTokenWithIdentity(
+        { agentId: "endorsed-agent", scopes: ["github:repo:read"] },
+        identity.persistentId
+      );
+
+      const authorityKeypair = crypto.generateKeyPairSync("ed25519", {
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      const endorsement = createEndorsement(
+        "standards-authority",
+        authorityKeypair.privateKey,
+        authorityKeypair.publicKey,
+        identity.persistentId,
+        token.persistentIdentity!.publicKey!,
+        "certified-agent"
+      );
+      token.persistentIdentity!.endorsements = [endorsement];
+
+      const result = verifyIdentityProof(token, {
+        trustedAuthorities: { "standards-authority": authorityKeypair.publicKey },
+      });
+
+      assert.strictEqual(result.valid, true);
+      assert.strictEqual(result.verifiedEndorsements!.length, 1);
+      assert.strictEqual(result.verifiedEndorsements![0].claim, "certified-agent");
+    } finally {
+      fs.rmSync(tmpDir2, { recursive: true, force: true });
+    }
   });
 });

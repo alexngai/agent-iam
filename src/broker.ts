@@ -307,6 +307,7 @@ export class Broker {
     // For platform (HMAC) identities, publicKey will be undefined — these identities
     // can only be verified via Broker.verifyTokenIdentity(), not standalone.
     const publicKey = (identity.metadata.publicKey as string) ?? undefined;
+    const publicKeyJwk = (identity.metadata.publicKeyJwk as JsonWebKey) ?? undefined;
 
     // 5. Embed proof + public key in the token — self-certifying
     return this.tokenService.createRootToken({
@@ -317,6 +318,7 @@ export class Broker {
         challenge,
         proof: identityProof.proof,
         publicKey,
+        publicKeyJwk,
       },
     });
   }
