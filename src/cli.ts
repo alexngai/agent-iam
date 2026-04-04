@@ -312,7 +312,7 @@ tokenCmd
   .option("--max-depth <depth>", "Maximum delegation depth", "3")
   .option("--no-delegatable", "Disable delegation")
   .option("--identity <persistentId>", "Bind token to a persistent identity")
-  .action((options) => {
+  .action(async (options) => {
     const broker = new Broker();
 
     try {
@@ -323,7 +323,7 @@ tokenCmd
 
       let token;
       if (options.identity) {
-        token = broker.createRootTokenWithIdentity(
+        token = await broker.createRootTokenWithIdentity(
           {
             agentId: options.agentId,
             scopes,

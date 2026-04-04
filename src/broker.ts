@@ -4,6 +4,7 @@
 
 import type {
   AgentToken,
+  CreateRootTokenParams,
   DelegationRequest,
   CredentialResult,
   VerificationResult,
@@ -70,14 +71,7 @@ export class Broker {
   /**
    * Create a root token with the specified capabilities
    */
-  createRootToken(params: {
-    agentId: string;
-    scopes: string[];
-    constraints?: Constraints;
-    delegatable?: boolean;
-    maxDelegationDepth?: number;
-    ttlDays?: number;
-  }): AgentToken {
+  createRootToken(params: CreateRootTokenParams): AgentToken {
     return this.tokenService.createRootToken(params);
   }
 
@@ -95,10 +89,69 @@ export class Broker {
   }
 
   /**
-   * Verify a token's validity
+   * Verify a token's validity (signature + expiration).
+   * Does NOT verify persistent identity proof — use verifyTokenIdentity() for that.
    */
   verifyToken(token: AgentToken): VerificationResult {
     return this.tokenService.verify(token);
+  }
+
+  /**
+   * Verify a token's persistent identity proof.
+   *
+   * Checks that:
+   *   1. The token's HMAC signature is valid (not tampered with)
+   *   2. The identity proof cryptographically proves the token creator
+   *      controlled the claimed persistent identity at creation time
+   *
+   * This prevents impersonation: you can't claim to be "key:abc123"
+   * without having the private key that corresponds to it.
+   *
+   * Returns { valid: true, persistentId } if identity is verified,
+   * or { valid: false, error } explaining what failed.
+   */
+  async verifyTokenIdentity(
+    token: AgentToken
+  ): Promise<VerificationResult & { persistentId?: string }> {
+    // First verify the token itself (signature + expiration)
+    const tokenResult = this.tokenService.verify(token);
+    if (!tokenResult.valid) {
+      return tokenResult;
+    }
+
+    // Check that token has a persistent identity claim
+    if (!token.persistentIdentity) {
+      return { valid: false, error: "Token has no persistent identity" };
+    }
+
+    const { persistentId, challenge, proof } = token.persistentIdentity;
+
+    // Proof and challenge must both be present
+    if (!proof || !challenge) {
+      return {
+        valid: false,
+        error: "Token has persistent identity but missing proof or challenge (token was created without proof-of-possession)",
+      };
+    }
+
+    // Reconstruct the identity proof and verify it
+    const identityProof = {
+      persistentId,
+      identityType: token.persistentIdentity.identityType as import("./identity/types.js").IdentityType,
+      challenge,
+      proof,
+      provenAt: "", // Not needed for verification
+    };
+
+    const verified = await this.identityService.verifyProof(identityProof, challenge);
+    if (!verified) {
+      return {
+        valid: false,
+        error: `Identity proof verification failed for ${persistentId}`,
+      };
+    }
+
+    return { valid: true, persistentId };
   }
 
   /**
@@ -214,19 +267,33 @@ export class Broker {
 
   /**
    * Create a root token bound to a persistent identity.
-   * Generates an identity proof and embeds it in the token.
+   * Generates a challenge, proves identity ownership via the provider's
+   * prove() method, and embeds the cryptographic proof in the token.
+   *
+   * This is the proof-of-possession flow:
+   *   1. Generate challenge from agentId + nonce
+   *   2. Identity holder signs challenge (Ed25519 or HMAC depending on provider)
+   *   3. Proof embedded in token alongside the challenge
+   *   4. Verifier can later check: does this proof match the public key?
    */
-  createRootTokenWithIdentity(
-    params: Parameters<typeof this.tokenService.createRootToken>[0],
+  async createRootTokenWithIdentity(
+    params: CreateRootTokenParams,
     persistentId: string
-  ): AgentToken {
+  ): Promise<AgentToken> {
+    // 1. Generate a challenge bound to this agent's token creation
     const challenge = this.identityService.generateChallenge(params.agentId);
+
+    // 2. Prove the caller controls the identity (Ed25519 sign or HMAC)
+    const identityProof = await this.identityService.proveIdentity(persistentId, challenge);
+
+    // 3. Embed the proof in the token — verifiers can check this independently
     return this.tokenService.createRootToken({
       ...params,
       persistentIdentity: {
         persistentId,
-        identityType: persistentId.split(":")[0],
+        identityType: identityProof.identityType,
         challenge,
+        proof: identityProof.proof,
       },
     });
   }

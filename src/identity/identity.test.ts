@@ -527,3 +527,192 @@ describe("Token + Identity integration", () => {
     assert.strictEqual(result.valid, true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// BROKER-LEVEL PROOF-OF-POSSESSION
+// ─────────────────────────────────────────────────────────────────
+
+import { Broker } from "../broker.js";
+
+describe("Proof-of-possession via Broker", () => {
+  let tmpDir: string;
+  let broker: Broker;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-pop-"));
+    broker = new Broker(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("createRootTokenWithIdentity embeds cryptographic proof (keypair)", async () => {
+    const identity = await broker.createIdentity({ type: "keypair", label: "pop-test" });
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "orchestrator", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Token should have persistent identity with proof
+    assert.ok(token.persistentIdentity);
+    assert.strictEqual(token.persistentIdentity!.persistentId, identity.persistentId);
+    assert.strictEqual(token.persistentIdentity!.identityType, "keypair");
+    assert.ok(token.persistentIdentity!.challenge, "challenge should be present");
+    assert.ok(token.persistentIdentity!.proof, "proof should be present");
+  });
+
+  test("createRootTokenWithIdentity embeds cryptographic proof (platform)", async () => {
+    const identity = await broker.createIdentity({ type: "platform", label: "pop-platform" });
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "worker", scopes: ["aws:s3:read"] },
+      identity.persistentId
+    );
+
+    assert.ok(token.persistentIdentity);
+    assert.ok(token.persistentIdentity!.proof, "proof should be present");
+    assert.ok(token.persistentIdentity!.challenge, "challenge should be present");
+  });
+
+  test("verifyTokenIdentity succeeds for valid proof (keypair)", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "verifiable-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+
+  test("verifyTokenIdentity succeeds for valid proof (platform)", async () => {
+    const identity = await broker.createIdentity({ type: "platform" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "platform-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+
+  test("verifyTokenIdentity fails for token without identity", async () => {
+    const token = broker.createRootToken({
+      agentId: "no-identity",
+      scopes: ["github:repo:read"],
+    });
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, false);
+    assert.ok(result.error!.includes("no persistent identity"));
+  });
+
+  test("verifyTokenIdentity fails for token with identity but no proof", async () => {
+    // Create a token using createRootToken directly (bypassing PoP flow)
+    // This simulates a token created before PoP was wired in
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = broker.createRootToken({
+      agentId: "no-proof-agent",
+      scopes: ["github:repo:read"],
+      persistentIdentity: {
+        persistentId: identity.persistentId,
+        identityType: "keypair",
+        challenge: "some-challenge",
+        // proof is intentionally missing — token was created without PoP
+      },
+    });
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, false);
+    assert.ok(result.error!.includes("missing proof"));
+  });
+
+  test("verifyTokenIdentity fails for tampered proof (HMAC catches it)", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "tamper-test", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Tamper with the proof — this also invalidates the token's HMAC signature
+    // since the proof is part of the signed payload
+    token.persistentIdentity!.proof = token.persistentIdentity!.proof!.slice(0, -4) + "XXXX";
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, false);
+    // HMAC catches the tampering before identity verification runs
+    assert.ok(result.error!.includes("Invalid signature"));
+  });
+
+  test("verifyTokenIdentity fails after identity revocation", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "revoke-test", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Verify works before revocation
+    const beforeRevoke = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(beforeRevoke.valid, true);
+
+    // Revoke the identity
+    await broker.revokeIdentity(identity.persistentId);
+
+    // Verification should now fail (identity no longer exists)
+    const afterRevoke = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(afterRevoke.valid, false);
+  });
+
+  test("impersonation: cannot claim another agent's identity", async () => {
+    const realIdentity = await broker.createIdentity({ type: "keypair", label: "real" });
+    const fakeIdentity = await broker.createIdentity({ type: "keypair", label: "fake" });
+
+    // Create a token legitimately bound to the real identity
+    const realToken = await broker.createRootTokenWithIdentity(
+      { agentId: "real-agent", scopes: ["github:repo:read"] },
+      realIdentity.persistentId
+    );
+
+    // Attacker tries to swap the persistent ID to claim they're the fake identity
+    // while keeping the real identity's proof
+    const tamperedToken = {
+      ...realToken,
+      persistentIdentity: {
+        ...realToken.persistentIdentity!,
+        persistentId: fakeIdentity.persistentId, // Swap identity
+        // proof is still from realIdentity — won't match fakeIdentity's public key
+      },
+    };
+
+    const result = await broker.verifyTokenIdentity(tamperedToken);
+    assert.strictEqual(result.valid, false);
+  });
+
+  test("proof from delegated child token is also verifiable", async () => {
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const parent = await broker.createRootTokenWithIdentity(
+      { agentId: "parent", scopes: ["github:repo:read", "github:repo:write"] },
+      identity.persistentId
+    );
+
+    // Delegate to child — inherits identity + proof
+    const child = broker.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+    });
+
+    // Child should have the same identity proof
+    assert.ok(child.persistentIdentity);
+    assert.strictEqual(child.persistentIdentity!.persistentId, identity.persistentId);
+    assert.ok(child.persistentIdentity!.proof);
+
+    // And it should verify
+    const result = await broker.verifyTokenIdentity(child);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+});
