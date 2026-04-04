@@ -1,12 +1,15 @@
 # Agent IAM
 
-A capability-based credential broker for AI agents. Manages what agents can do through cryptographically signed tokens that support hierarchical delegation with automatic scope attenuation.
+A capability-based credential broker for AI agents. Manages what agents can do through cryptographically signed tokens that support hierarchical delegation with automatic scope attenuation. Includes a persistent identity system for cross-session agent identity with self-certifying verification.
 
 ## Features
 
 - **Capability Tokens**: HMAC-SHA256 signed tokens defining allowed scopes and constraints
 - **Hierarchical Delegation**: Agents can delegate narrower capabilities to sub-agents
-- **Provider Adapters**: GitHub, Google OAuth, AWS STS, and generic API keys
+- **Persistent Identity**: Ed25519 keypair or platform-assigned identities that survive across sessions
+- **Self-Certifying Verification**: Remote services can verify agent identity without broker access
+- **Authority Endorsements**: Trusted parties can vouch for agent identities (X.509/VC-like)
+- **Provider Adapters**: GitHub, Google OAuth, AWS STS, Slack, and generic API keys
 - **Distributed Mode**: Leader/follower sync for multi-region deployments
 - **Token Refresh**: Background refresh for long-running agents
 - **CLI & Library**: Use programmatically or via command line
@@ -121,6 +124,94 @@ const openaiCred = await broker.getCredential(token, "openai:chat:completions", 
 // { credentialType: "api_key", credential: { apiKey: "sk-...", headers: {...} }, expiresAt: "..." }
 ```
 
+### 4. Persistent Agent Identity
+
+Give agents a cryptographic identity that persists across sessions. Identity ("who you are") is separate from capabilities ("what you can do").
+
+```typescript
+import { Broker, verifyIdentityProof, createEndorsement } from "agent-iam";
+
+const broker = new Broker();
+
+// Create a persistent identity (Ed25519 keypair stored locally)
+const identity = await broker.createIdentity({ type: "keypair", label: "my-code-reviewer" });
+// identity.persistentId === "key:a1b2c3..."
+
+// Create token bound to the identity (proof-of-possession)
+const token = await broker.createRootTokenWithIdentity(
+  { agentId: "code-reviewer", scopes: ["github:repo:read"], ttlDays: 7 },
+  identity.persistentId
+);
+// Token now contains: public key + Ed25519 signature proving key ownership
+```
+
+#### Remote Verification (No Broker Needed)
+
+A remote service can verify the agent's identity using only the token — no broker access required:
+
+```typescript
+// On the remote service (no broker, no shared secrets)
+import { verifyIdentityProof } from "agent-iam";
+
+const result = verifyIdentityProof(token);
+if (result.valid) {
+  console.log(`Verified agent: ${result.persistentId}`);
+  console.log(`Public key: ${result.publicKey}`);
+  // Store the public key for future recognition (TOFU)
+}
+```
+
+#### Authority Endorsements
+
+Trusted authorities can vouch for an agent's identity:
+
+```typescript
+// Authority signs the agent's public key + claim
+const endorsement = createEndorsement(
+  "acme-corp",                      // Authority ID
+  authorityPrivateKey,              // Authority's Ed25519 private key
+  authorityPublicKey,               // Authority's Ed25519 public key
+  identity.persistentId,            // Agent's persistent ID
+  token.persistentIdentity.publicKey, // Agent's public key
+  "member-of:acme-engineering"      // What the authority attests
+);
+
+// Attach to token
+token.persistentIdentity.endorsements = [endorsement];
+
+// Remote service verifies with trusted authority keys
+const result = verifyIdentityProof(token, {
+  trustedAuthorities: { "acme-corp": acmePublicKeyPem },
+});
+// result.verifiedEndorsements === [{ authorityId: "acme-corp", claim: "member-of:acme-engineering" }]
+```
+
+#### Identity Management CLI
+
+```bash
+# Create identities
+agent-iam identity create --type keypair --label "my-agent"
+agent-iam identity create --type platform --label "team-agent"
+
+# List and inspect
+agent-iam identity list
+agent-iam identity show key:a1b2c3...
+
+# Bind to token
+agent-iam token create-root --agent-id myagent --scopes "github:repo:read" --identity key:a1b2c3...
+
+# Revoke
+agent-iam identity revoke key:a1b2c3...
+```
+
+#### Trust Model
+
+| Level | Mechanism | What it proves |
+|-------|-----------|---------------|
+| **Self-signed (TOFU)** | Ed25519 proof in token | "This is the same agent I've seen before" |
+| **Behavioral** | Service tracks interactions | "This agent has been reliable over 100 requests" |
+| **Authority-endorsed** | Authority signature on public key | "A trusted party vouches for this agent" |
+
 ## Scope Format
 
 Scopes follow `provider:resource:action` pattern:
@@ -170,8 +261,16 @@ agent-iam apikey add --name openai --provider openai --key sk-...
 agent-iam apikey list
 agent-iam apikey remove openai
 
+# Identity
+agent-iam identity create --type keypair --label "my-agent"
+agent-iam identity create --type platform --label "team-agent"
+agent-iam identity list
+agent-iam identity show key:a1b2c3...
+agent-iam identity revoke key:a1b2c3...
+
 # Tokens
 agent-iam token create-root --agent-id myagent --scopes "github:repo:read" --ttl-days 7
+agent-iam token create-root --agent-id myagent --scopes "github:repo:read" --identity key:a1b2c3...
 agent-iam token delegate --parent <token> --scopes "github:repo:read" --ttl-minutes 60
 agent-iam token verify <token>
 agent-iam token show <token>
@@ -222,11 +321,14 @@ await follower.start();
 ## Security Model
 
 1. **Cryptographic Verification**: All tokens signed with HMAC-SHA256
-2. **Least Privilege**: Delegation can only narrow capabilities, never widen
-3. **Time-Bounded**: All tokens expire; constraints can add time windows
-4. **Tamper-Proof**: Any token modification invalidates signature
-5. **Revocation**: Centralized revocation synced to followers
-6. **Key Rotation**: Supports key rotation with grace period for old tokens
+2. **Proof-of-Possession**: Identity bound to tokens via Ed25519 signatures
+3. **Self-Certifying**: Tokens carry public keys for broker-free verification
+4. **Least Privilege**: Delegation can only narrow capabilities, never widen
+5. **Anti-Impersonation**: Public key fingerprint must match claimed persistentId
+6. **Time-Bounded**: All tokens expire; constraints can add time windows
+7. **Tamper-Proof**: Any token modification invalidates signature
+8. **Revocation**: Centralized revocation synced to followers; identity revocation supported
+9. **Key Rotation**: Supports key rotation with grace period for old tokens
 
 ## Architecture
 
@@ -235,29 +337,39 @@ await follower.start();
 │                         Broker                                   │
 │  - Token creation, verification, delegation                      │
 │  - Credential issuance from providers                           │
+│  - Identity management (create, prove, verify, revoke)          │
 │  - Configuration management                                      │
-└─────────────────────┬───────────────────────────────────────────┘
-                      │
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-   ┌─────────┐  ┌─────────┐  ┌─────────┐
-   │ GitHub  │  │  AWS    │  │ API Key │
-   │Provider │  │Provider │  │Provider │
-   └─────────┘  └─────────┘  └─────────┘
+└──────────┬──────────────────────────┬───────────────────────────┘
+           │                          │
+   ┌───────┴───────┐        ┌────────┴────────┐
+   │   Providers   │        │ Identity Service │
+   ├───────────────┤        ├─────────────────┤
+   │ GitHub        │        │ Keypair (Ed25519)│  ← Self-certifying
+   │ Google OAuth  │        │ Platform (HMAC)  │  ← Broker-managed
+   │ AWS STS       │        │ (pluggable)      │
+   │ Slack         │        └─────────────────┘
+   │ API Keys      │
+   └───────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
 │                      AgentRuntime                                │
 │  - Token lifecycle management                                   │
+│  - Persistent identity access (getPersistentId())               │
 │  - Background refresh                                           │
 │  - Subprocess environment creation                              │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
+│              Standalone Verifier (no broker needed)              │
+│  - verifyIdentityProof() — Ed25519 proof verification           │
+│  - Fingerprint check (public key → persistentId)                │
+│  - Authority endorsement verification                           │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
 │                    Distributed Mode                              │
 │  Leader ◄──────sync──────► Follower                             │
-│  - Signing keys                                                 │
-│  - Revocation lists                                             │
-│  - Provider configs                                             │
+│  - Signing keys, revocation lists, provider configs             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -270,11 +382,19 @@ class Broker {
   constructor(configDir?: string);
 
   // Token operations
-  createRootToken(params): AgentToken;
+  createRootToken(params: CreateRootTokenParams): AgentToken;
   delegate(parent: AgentToken, request: DelegationRequest): AgentToken;
   verifyToken(token: AgentToken): VerificationResult;
   checkPermission(token: AgentToken, scope: string, resource: string): VerificationResult;
   refreshToken(token: AgentToken, ttlMinutes?: number): AgentToken;
+
+  // Identity operations
+  createIdentity(options?: { label?: string; type?: "keypair" | "platform" }): Promise<PersistentIdentity>;
+  loadIdentity(persistentId: string): Promise<PersistentIdentity | null>;
+  listIdentities(): Promise<PersistentIdentity[]>;
+  revokeIdentity(persistentId: string): Promise<void>;
+  createRootTokenWithIdentity(params: CreateRootTokenParams, persistentId: string): Promise<AgentToken>;
+  verifyTokenIdentity(token: AgentToken): Promise<VerificationResult & { persistentId?: string }>;
 
   // Serialization
   serializeToken(token: AgentToken): string;
@@ -290,6 +410,30 @@ class Broker {
   getStatus(): BrokerStatus;
   showConfig(): Record<string, unknown>;
 }
+```
+
+### Standalone Verifier
+
+```typescript
+// Verify agent identity without broker access (works anywhere)
+function verifyIdentityProof(
+  token: AgentToken,
+  options?: {
+    trustedAuthorities?: Record<string, string>;  // authorityId → public key PEM
+    requireFingerprintMatch?: boolean;             // default: true
+  }
+): StandaloneVerificationResult;
+
+// Create an authority endorsement for an agent
+function createEndorsement(
+  authorityId: string,
+  authorityPrivateKey: string,
+  authorityPublicKey: string,
+  agentPersistentId: string,
+  agentPublicKey: string,
+  claim: string,
+  expiresAt?: string
+): AuthorityEndorsement;
 ```
 
 ### AgentRuntime
@@ -328,13 +472,40 @@ interface AgentToken {
   expiresAt?: string;
   maxExpiresAt?: string;
   signature?: string;
+  // Persistent identity (optional)
+  persistentIdentity?: {
+    persistentId: string;          // "key:abc..." or "platform:uuid"
+    identityType: string;          // "keypair" or "platform"
+    proof?: string;                // Ed25519 signature or HMAC
+    challenge?: string;            // What was signed
+    publicKey?: string;            // PEM public key for standalone verification
+    endorsements?: AuthorityEndorsement[];
+  };
 }
 
-interface ScopeConstraint {
-  resources?: string[];
-  notBefore?: string;
-  notAfter?: string;
-  maxUses?: number;
+interface PersistentIdentity {
+  persistentId: string;
+  identityType: "keypair" | "platform" | "attested" | "decentralized";
+  createdAt: string;
+  label?: string;
+  metadata: Record<string, unknown>;
+}
+
+interface AuthorityEndorsement {
+  authorityId: string;
+  authorityPublicKey: string;
+  claim: string;
+  signature: string;
+  issuedAt: string;
+  expiresAt?: string;
+}
+
+interface StandaloneVerificationResult {
+  valid: boolean;
+  error?: string;
+  persistentId?: string;
+  publicKey?: string;
+  verifiedEndorsements?: VerifiedEndorsement[];
 }
 
 interface DelegationRequest {
@@ -343,12 +514,8 @@ interface DelegationRequest {
   requestedConstraints?: Record<string, ScopeConstraint>;
   delegatable?: boolean;
   ttlMinutes?: number;
-}
-
-interface CredentialResult {
-  credentialType: "bearer_token" | "aws_credentials" | "api_key";
-  credential: Record<string, unknown>;
-  expiresAt?: string;
+  inheritPersistentIdentity?: boolean;  // default: true
+  persistentIdentity?: { ... };         // override child identity
 }
 ```
 
@@ -529,7 +696,7 @@ npm install
 # Build
 npm run build
 
-# Run tests (209 tests)
+# Run tests (318 tests)
 npm test
 
 # Run CLI
