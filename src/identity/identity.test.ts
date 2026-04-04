@@ -2138,3 +2138,407 @@ describe("VC-format endorsements", () => {
     assert.ok(deserialized.proof.proofValue);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// SPIFFE IDENTITY PROVIDER
+// ─────────────────────────────────────────────────────────────────
+
+import { SpiffeIdentityProvider } from "./spiffe-provider.js";
+import type { SpiffeCreateOptions } from "./spiffe-provider.js";
+
+describe("SpiffeIdentityProvider", () => {
+  let tmpDir: string;
+  let provider: SpiffeIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-spiffe-"));
+    provider = new SpiffeIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("creates a SPIFFE identity with spiffe:// prefix", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/code-reviewer",
+      label: "reviewer",
+    } as SpiffeCreateOptions);
+
+    assert.strictEqual(identity.persistentId, "spiffe://example.com/agents/code-reviewer");
+    assert.strictEqual(identity.identityType, "attested");
+    assert.strictEqual(identity.label, "reviewer");
+    assert.strictEqual(identity.metadata.trustDomain, "example.com");
+    assert.ok(identity.metadata.publicKey);
+    assert.strictEqual(identity.metadata.algorithm, "ed25519");
+    assert.ok(identity.createdAt);
+  });
+
+  test("rejects invalid SPIFFE IDs", async () => {
+    await assert.rejects(
+      () => provider.create({ spiffeId: "not-a-spiffe-id" } as SpiffeCreateOptions),
+      /Invalid SPIFFE ID/
+    );
+
+    await assert.rejects(
+      () => provider.create({ spiffeId: "spiffe://UPPER/path" } as SpiffeCreateOptions),
+      /Invalid SPIFFE ID/
+    );
+  });
+
+  test("requires spiffeId option", async () => {
+    await assert.rejects(
+      () => provider.create({ label: "no-spiffe-id" }),
+      /requires a spiffeId/
+    );
+  });
+
+  test("persists identity and loads it back", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/test",
+    } as SpiffeCreateOptions);
+
+    const loaded = await provider.load(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.persistentId, identity.persistentId);
+    assert.strictEqual(loaded!.metadata.trustDomain, "example.com");
+  });
+
+  test("returns null for unknown identity", async () => {
+    const loaded = await provider.load("spiffe://example.com/agents/unknown");
+    assert.strictEqual(loaded, null);
+  });
+
+  test("lists all identities", async () => {
+    await provider.create({ spiffeId: "spiffe://example.com/agents/a" } as SpiffeCreateOptions);
+    await provider.create({ spiffeId: "spiffe://example.com/agents/b" } as SpiffeCreateOptions);
+
+    const identities = await provider.list();
+    assert.strictEqual(identities.length, 2);
+  });
+
+  test("generates and verifies identity proof (Ed25519)", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/prover",
+    } as SpiffeCreateOptions);
+
+    const challenge = "spiffe-challenge-12345";
+    const proof = await provider.prove(identity.persistentId, challenge);
+
+    assert.strictEqual(proof.persistentId, identity.persistentId);
+    assert.strictEqual(proof.identityType, "attested");
+    assert.strictEqual(proof.challenge, challenge);
+    assert.ok(proof.proof);
+
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rejects proof with wrong challenge", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/test",
+    } as SpiffeCreateOptions);
+
+    const proof = await provider.prove(identity.persistentId, "challenge-a");
+    const valid = await provider.verify(proof, "challenge-b");
+    assert.strictEqual(valid, false);
+  });
+
+  test("rejects proof with tampered signature", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/test",
+    } as SpiffeCreateOptions);
+
+    const challenge = "tamper-test";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    proof.proof = proof.proof.slice(0, -4) + "XXXX";
+
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, false);
+  });
+
+  test("revokes identity and prevents loading/proving", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/revokable",
+    } as SpiffeCreateOptions);
+
+    await provider.revoke(identity.persistentId);
+
+    const loaded = await provider.load(identity.persistentId);
+    assert.strictEqual(loaded, null);
+
+    await assert.rejects(
+      () => provider.prove(identity.persistentId, "challenge"),
+      /not found or revoked/
+    );
+  });
+
+  test("revoke() throws on invalid SPIFFE ID format", async () => {
+    await assert.rejects(
+      () => provider.revoke("key:something"),
+      /must start with "spiffe:\/\/"/
+    );
+  });
+
+  test("revoke() throws on unknown identity", async () => {
+    await assert.rejects(
+      () => provider.revoke("spiffe://example.com/agents/nonexistent"),
+      /not found/
+    );
+  });
+
+  test("proof from one identity does not verify as another", async () => {
+    const id1 = await provider.create({
+      spiffeId: "spiffe://example.com/agents/agent-1",
+    } as SpiffeCreateOptions);
+    await provider.create({
+      spiffeId: "spiffe://example.com/agents/agent-2",
+    } as SpiffeCreateOptions);
+
+    const challenge = "cross-identity-test";
+    const proof = await provider.prove(id1.persistentId, challenge);
+
+    // Swap the persistent ID
+    proof.persistentId = "spiffe://example.com/agents/agent-2";
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, false);
+  });
+
+  test("accepts pre-provisioned SVID key pair", async () => {
+    const keypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/provisioned",
+      svidPrivateKey: keypair.privateKey,
+      svidPublicKey: keypair.publicKey,
+    } as SpiffeCreateOptions);
+
+    assert.strictEqual(identity.metadata.publicKey, keypair.publicKey);
+
+    // Should be able to prove with the provided key
+    const challenge = "pre-provisioned-challenge";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+});
+
+describe("SPIFFE SVID rotation", () => {
+  let tmpDir: string;
+  let provider: SpiffeIdentityProvider;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-spiffe-rotate-"));
+    provider = new SpiffeIdentityProvider(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("rotates SVID key material while preserving SPIFFE ID", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/rotatable",
+    } as SpiffeCreateOptions);
+
+    const oldPublicKey = identity.metadata.publicKey;
+
+    // Rotate
+    const rotated = await provider.rotateSvid(identity.persistentId);
+
+    // Same SPIFFE ID
+    assert.strictEqual(rotated.persistentId, identity.persistentId);
+    // Different public key
+    assert.notStrictEqual(rotated.metadata.publicKey, oldPublicKey);
+
+    // Old proofs should fail (key changed)
+    // New proofs should succeed
+    const challenge = "post-rotation-challenge";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rotates with externally provided key pair", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/external-rotate",
+    } as SpiffeCreateOptions);
+
+    const newKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const rotated = await provider.rotateSvid(
+      identity.persistentId,
+      newKeypair.privateKey,
+      newKeypair.publicKey
+    );
+
+    assert.strictEqual(rotated.metadata.publicKey, newKeypair.publicKey);
+
+    const challenge = "external-rotation";
+    const proof = await provider.prove(identity.persistentId, challenge);
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, true);
+  });
+
+  test("rotation fails for revoked identity", async () => {
+    const identity = await provider.create({
+      spiffeId: "spiffe://example.com/agents/revoked-rotate",
+    } as SpiffeCreateOptions);
+
+    await provider.revoke(identity.persistentId);
+
+    await assert.rejects(
+      () => provider.rotateSvid(identity.persistentId),
+      /not found or revoked/
+    );
+  });
+});
+
+describe("SPIFFE integration with IdentityService and Broker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-spiffe-int-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("IdentityService routes spiffe:// to attested provider", async () => {
+    const service = new IdentityService();
+    service.registerProvider(new KeypairIdentityProvider(tmpDir));
+    service.registerProvider(new SpiffeIdentityProvider(tmpDir));
+
+    const identity = await service.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/routed",
+    } as any);
+
+    assert.strictEqual(identity.persistentId, "spiffe://example.com/agents/routed");
+    assert.strictEqual(identity.identityType, "attested");
+
+    // Load via service should route correctly
+    const loaded = await service.loadIdentity(identity.persistentId);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.identityType, "attested");
+  });
+
+  test("Broker creates token with SPIFFE identity", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/broker-test",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "spiffe-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    assert.ok(token.persistentIdentity);
+    assert.strictEqual(token.persistentIdentity!.persistentId, "spiffe://example.com/agents/broker-test");
+    assert.strictEqual(token.persistentIdentity!.identityType, "attested");
+    assert.ok(token.persistentIdentity!.proof);
+    assert.ok(token.persistentIdentity!.publicKey);
+  });
+
+  test("Broker verifies SPIFFE identity token", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/verifiable",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "spiffe-verified", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = await broker.verifyTokenIdentity(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, identity.persistentId);
+  });
+
+  test("SPIFFE identity verifies standalone (no broker)", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/standalone",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "spiffe-standalone", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Standalone verification — no broker needed
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.persistentId, "spiffe://example.com/agents/standalone");
+    assert.ok(result.publicKey);
+  });
+
+  test("SPIFFE identity inherits through delegation", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/parent",
+    } as any);
+
+    const parent = await broker.createRootTokenWithIdentity(
+      { agentId: "parent", scopes: ["github:repo:read", "github:repo:write"] },
+      identity.persistentId
+    );
+
+    const child = broker.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+    });
+
+    assert.ok(child.persistentIdentity);
+    assert.strictEqual(child.persistentIdentity!.persistentId, identity.persistentId);
+    assert.strictEqual(child.persistentIdentity!.identityType, "attested");
+  });
+
+  test("SPIFFE token works with VC endorsements", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({
+      type: "attested",
+      spiffeId: "spiffe://example.com/agents/endorsed",
+    } as any);
+
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "endorsed-spiffe", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const authorityKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const vc = createVcEndorsement(
+      "did:web:infra-authority.com",
+      authorityKeypair.privateKey,
+      authorityKeypair.publicKey,
+      identity.persistentId,
+      "workload-attested"
+    );
+    token.persistentIdentity!.endorsements = [vc];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "did:web:infra-authority.com": authorityKeypair.publicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "workload-attested");
+  });
+});

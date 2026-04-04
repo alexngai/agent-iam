@@ -10,6 +10,8 @@ export type { IdentityServiceConfig } from "./identity-service.js";
 
 export { KeypairIdentityProvider } from "./keypair-provider.js";
 export { PlatformIdentityProvider } from "./platform-provider.js";
+export { SpiffeIdentityProvider } from "./spiffe-provider.js";
+export type { SpiffeCreateOptions } from "./spiffe-provider.js";
 export {
   verifyIdentityProof,
   createEndorsement,

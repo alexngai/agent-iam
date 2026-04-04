@@ -107,6 +107,10 @@ export function verifyIdentityProof(
   }
 
   // 3. Verify the persistentId matches the public key
+  //    - For keypair identities: DID:key or legacy fingerprint check
+  //    - For attested (SPIFFE) identities: the SPIFFE URI is not derived from the key,
+  //      so we skip the fingerprint match. Trust is established via the SVID certificate
+  //      chain or TOFU (pinning the public key on first encounter).
   if (requireFingerprintMatch && identityType === "keypair") {
     const matchResult = verifyKeyMatch(persistentId, publicKey);
     if (!matchResult.valid) {
@@ -115,7 +119,8 @@ export function verifyIdentityProof(
   }
 
   // 4. Verify the proof (Ed25519 signature over the challenge)
-  if (identityType === "keypair") {
+  //    Both keypair and attested (SPIFFE) identities use Ed25519 signatures.
+  if (identityType === "keypair" || identityType === "attested") {
     try {
       const pubKeyObj = crypto.createPublicKey(publicKey);
       const signatureBuffer = Buffer.from(proof, "base64url");
@@ -134,6 +139,7 @@ export function verifyIdentityProof(
       };
     }
   } else {
+    // Platform (HMAC) identities cannot be verified without the broker's secret.
     return {
       valid: false,
       error: `Identity type "${identityType}" cannot be verified standalone — ` +

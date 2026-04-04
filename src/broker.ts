@@ -26,6 +26,7 @@ import {
   IdentityService,
   KeypairIdentityProvider,
   PlatformIdentityProvider,
+  SpiffeIdentityProvider,
 } from "./identity/index.js";
 import type { PersistentIdentity, IdentityType } from "./identity/index.js";
 
@@ -62,6 +63,7 @@ export class Broker {
     const cfgDir = this.configService.getConfigDir();
     this.identityService.registerProvider(new KeypairIdentityProvider(cfgDir));
     this.identityService.registerProvider(new PlatformIdentityProvider(cfgDir));
+    this.identityService.registerProvider(new SpiffeIdentityProvider(cfgDir));
   }
 
   // ─────────────────────────────────────────────────────────────────
