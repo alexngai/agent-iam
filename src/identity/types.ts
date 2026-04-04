@@ -101,7 +101,7 @@ export interface IdentityProvider {
 }
 
 // ============================================================================
-// Trust Accumulation Types
+// Trust Accumulation Types (future — interfaces only, no implementation yet)
 // ============================================================================
 
 /** Types of trust claims that can be made about an agent */
@@ -156,6 +156,8 @@ export interface TrustScore {
 /**
  * Store for trust attestations.
  * Queried when making authorization decisions or adjusting permissions.
+ *
+ * **Not yet implemented** — interface only. See design doc for roadmap.
  */
 export interface TrustStore {
   /** Record a new attestation */
@@ -172,7 +174,7 @@ export interface TrustStore {
 }
 
 // ============================================================================
-// Resource Binding Types
+// Resource Binding Types (future — interfaces only, no implementation yet)
 // ============================================================================
 
 /** Types of resources that can be bound to an agent identity */
@@ -199,6 +201,8 @@ export interface AgentResource {
 /**
  * Registry of resources bound to agent identities.
  * The persistent ID is the key — resources follow the agent across sessions.
+ *
+ * **Not yet implemented** — interface only. See design doc for roadmap.
  */
 export interface AgentResourceRegistry {
   /** Bind a resource to an agent */

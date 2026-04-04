@@ -270,12 +270,17 @@ export class Broker {
    * Generates a challenge, proves identity ownership via the provider's
    * prove() method, and embeds the cryptographic proof in the token.
    *
-   * The token is self-certifying: it includes the public key, so any
-   * remote service can verify the identity proof without broker access.
+   * For keypair identities: the token is self-certifying — it includes
+   * the public key, so any remote service can verify without broker access.
+   *
+   * For platform identities: the token contains the HMAC proof but no
+   * public key (symmetric crypto). Verification requires broker access
+   * via verifyTokenIdentity(). The standalone verifyIdentityProof()
+   * function will reject these tokens with a clear error.
    *
    * Proof-of-possession flow:
    *   1. Generate challenge from agentId + nonce
-   *   2. Load identity to get public key
+   *   2. Load identity to get public key (if asymmetric)
    *   3. Identity holder signs challenge (Ed25519 or HMAC depending on provider)
    *   4. Public key + proof embedded in token
    *   5. Any verifier can check: does this proof match this public key?

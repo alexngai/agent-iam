@@ -323,6 +323,13 @@ tokenCmd
 
       let token;
       if (options.identity) {
+        const validPrefixes = ["key:", "platform:", "agent://", "did:"];
+        if (!validPrefixes.some((p: string) => options.identity.startsWith(p))) {
+          console.error(
+            `Error: Invalid persistent ID format "${options.identity}". Must start with: ${validPrefixes.join(", ")}`
+          );
+          process.exit(1);
+        }
         token = await broker.createRootTokenWithIdentity(
           {
             agentId: options.agentId,
