@@ -4,6 +4,7 @@
 
 import type {
   AgentToken,
+  CreateRootTokenParams,
   DelegationRequest,
   CredentialResult,
   VerificationResult,
@@ -21,6 +22,12 @@ import { GoogleProvider } from "./providers/google.js";
 import { AWSProvider } from "./providers/aws.js";
 import { APIKeyProvider } from "./providers/apikey.js";
 import { SlackProvider } from "./providers/slack.js";
+import {
+  IdentityService,
+  KeypairIdentityProvider,
+  PlatformIdentityProvider,
+} from "./identity/index.js";
+import type { PersistentIdentity, IdentityType } from "./identity/index.js";
 
 /** Credential cache entry */
 interface CacheEntry {
@@ -39,6 +46,7 @@ export interface BrokerStatus {
 export class Broker {
   private tokenService: TokenService;
   private configService: ConfigService;
+  private identityService: IdentityService;
   private credentialCache: Map<string, CacheEntry> = new Map();
 
   /** Cache buffer - evict credentials this many ms before expiry */
@@ -48,6 +56,12 @@ export class Broker {
     this.configService = new ConfigService(configDir);
     const secret = this.configService.getOrCreateSecret();
     this.tokenService = new TokenService(secret);
+
+    // Initialize identity service with default providers
+    this.identityService = new IdentityService();
+    const cfgDir = this.configService.getConfigDir();
+    this.identityService.registerProvider(new KeypairIdentityProvider(cfgDir));
+    this.identityService.registerProvider(new PlatformIdentityProvider(cfgDir));
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -57,14 +71,7 @@ export class Broker {
   /**
    * Create a root token with the specified capabilities
    */
-  createRootToken(params: {
-    agentId: string;
-    scopes: string[];
-    constraints?: Constraints;
-    delegatable?: boolean;
-    maxDelegationDepth?: number;
-    ttlDays?: number;
-  }): AgentToken {
+  createRootToken(params: CreateRootTokenParams): AgentToken {
     return this.tokenService.createRootToken(params);
   }
 
@@ -82,10 +89,69 @@ export class Broker {
   }
 
   /**
-   * Verify a token's validity
+   * Verify a token's validity (signature + expiration).
+   * Does NOT verify persistent identity proof — use verifyTokenIdentity() for that.
    */
   verifyToken(token: AgentToken): VerificationResult {
     return this.tokenService.verify(token);
+  }
+
+  /**
+   * Verify a token's persistent identity proof.
+   *
+   * Checks that:
+   *   1. The token's HMAC signature is valid (not tampered with)
+   *   2. The identity proof cryptographically proves the token creator
+   *      controlled the claimed persistent identity at creation time
+   *
+   * This prevents impersonation: you can't claim to be "key:abc123"
+   * without having the private key that corresponds to it.
+   *
+   * Returns { valid: true, persistentId } if identity is verified,
+   * or { valid: false, error } explaining what failed.
+   */
+  async verifyTokenIdentity(
+    token: AgentToken
+  ): Promise<VerificationResult & { persistentId?: string }> {
+    // First verify the token itself (signature + expiration)
+    const tokenResult = this.tokenService.verify(token);
+    if (!tokenResult.valid) {
+      return tokenResult;
+    }
+
+    // Check that token has a persistent identity claim
+    if (!token.persistentIdentity) {
+      return { valid: false, error: "Token has no persistent identity" };
+    }
+
+    const { persistentId, challenge, proof } = token.persistentIdentity;
+
+    // Proof and challenge must both be present
+    if (!proof || !challenge) {
+      return {
+        valid: false,
+        error: "Token has persistent identity but missing proof or challenge (token was created without proof-of-possession)",
+      };
+    }
+
+    // Reconstruct the identity proof and verify it
+    const identityProof = {
+      persistentId,
+      identityType: token.persistentIdentity.identityType as import("./identity/types.js").IdentityType,
+      challenge,
+      proof,
+      provenAt: "", // Not needed for verification
+    };
+
+    const verified = await this.identityService.verifyProof(identityProof, challenge);
+    if (!verified) {
+      return {
+        valid: false,
+        error: `Identity proof verification failed for ${persistentId}`,
+      };
+    }
+
+    return { valid: true, persistentId };
   }
 
   /**
@@ -163,6 +229,103 @@ export class Broker {
 
     // Create refreshed token with same capabilities but new expiry
     return this.tokenService.createRefreshedToken(token, newExpiresAt);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // IDENTITY OPERATIONS
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new persistent identity for an agent.
+   */
+  async createIdentity(
+    options?: { label?: string; type?: IdentityType }
+  ): Promise<PersistentIdentity> {
+    return this.identityService.createIdentity(options);
+  }
+
+  /**
+   * Load a persistent identity by its ID.
+   */
+  async loadIdentity(persistentId: string): Promise<PersistentIdentity | null> {
+    return this.identityService.loadIdentity(persistentId);
+  }
+
+  /**
+   * List all persistent identities.
+   */
+  async listIdentities(): Promise<PersistentIdentity[]> {
+    return this.identityService.listIdentities();
+  }
+
+  /**
+   * Revoke a persistent identity.
+   */
+  async revokeIdentity(persistentId: string): Promise<void> {
+    return this.identityService.revokeIdentity(persistentId);
+  }
+
+  /**
+   * Create a root token bound to a persistent identity.
+   * Generates a challenge, proves identity ownership via the provider's
+   * prove() method, and embeds the cryptographic proof in the token.
+   *
+   * For keypair identities: the token is self-certifying — it includes
+   * the public key, so any remote service can verify without broker access.
+   *
+   * For platform identities: the token contains the HMAC proof but no
+   * public key (symmetric crypto). Verification requires broker access
+   * via verifyTokenIdentity(). The standalone verifyIdentityProof()
+   * function will reject these tokens with a clear error.
+   *
+   * Proof-of-possession flow:
+   *   1. Generate challenge from agentId + nonce
+   *   2. Load identity to get public key (if asymmetric)
+   *   3. Identity holder signs challenge (Ed25519 or HMAC depending on provider)
+   *   4. Public key + proof embedded in token
+   *   5. Any verifier can check: does this proof match this public key?
+   *      And: does this public key hash to the claimed persistentId?
+   */
+  async createRootTokenWithIdentity(
+    params: CreateRootTokenParams,
+    persistentId: string
+  ): Promise<AgentToken> {
+    // 1. Generate a challenge bound to this agent's token creation
+    const challenge = this.identityService.generateChallenge(params.agentId);
+
+    // 2. Load the identity to get the public key
+    const identity = await this.identityService.loadIdentity(persistentId);
+    if (!identity) {
+      throw new Error(`Identity not found: ${persistentId}`);
+    }
+
+    // 3. Prove the caller controls the identity (Ed25519 sign or HMAC)
+    const identityProof = await this.identityService.proveIdentity(persistentId, challenge);
+
+    // 4. Extract public key from identity metadata.
+    // For keypair identities, this is the Ed25519 public key (enables standalone verification).
+    // For platform (HMAC) identities, publicKey will be undefined — these identities
+    // can only be verified via Broker.verifyTokenIdentity(), not standalone.
+    const publicKey = (identity.metadata.publicKey as string) ?? undefined;
+
+    // 5. Embed proof + public key in the token — self-certifying
+    return this.tokenService.createRootToken({
+      ...params,
+      persistentIdentity: {
+        persistentId,
+        identityType: identityProof.identityType,
+        challenge,
+        proof: identityProof.proof,
+        publicKey,
+      },
+    });
+  }
+
+  /**
+   * Get the identity service for direct access to providers.
+   */
+  getIdentityService(): IdentityService {
+    return this.identityService;
   }
 
   // ─────────────────────────────────────────────────────────────────

@@ -183,6 +183,63 @@ export interface AgentToken {
    * Separate from scope-based resource access.
    */
   agentCapabilities?: AgentCapabilities;
+
+  // ==========================================================================
+  // Persistent Identity (optional — links token to a cross-session identity)
+  // ==========================================================================
+
+  /**
+   * Persistent identity binding (optional)
+   * Links this token to a persistent agent identity that survives across sessions.
+   * Identity ("who you are") is separate from capability ("what you can do").
+   * When present, inherited through delegation chain by default.
+   */
+  persistentIdentity?: {
+    /** Stable identifier across sessions (e.g., "key:abc...", "platform:uuid") */
+    persistentId: string;
+    /** How this identity was established */
+    identityType: string;
+    /** Cryptographic proof binding this identity to the token */
+    proof?: string;
+    /** The challenge that was signed for the proof */
+    challenge?: string;
+    /**
+     * Public key (PEM or JWK) for self-certifying verification.
+     * When present, anyone can verify the identity proof without
+     * access to the broker or identity provider.
+     * The persistentId is derived from this key (fingerprint),
+     * so the verifier can confirm the key matches the claimed identity.
+     */
+    publicKey?: string;
+    /**
+     * Authority endorsements on this identity (optional).
+     * Each endorsement is a signature from a trusted authority over
+     * the agent's public key, attesting to some claim about the agent.
+     * Verifiers who trust the authority can use these for stronger
+     * trust than TOFU alone.
+     */
+    endorsements?: AuthorityEndorsement[];
+  };
+}
+
+/**
+ * An authority's endorsement (signature) over an agent's public key.
+ * Follows the X.509/VC pattern: a trusted party signs the agent's
+ * public key + claims, and anyone who trusts that party can verify.
+ */
+export interface AuthorityEndorsement {
+  /** Identifier of the authority (e.g., "acme-corp", "platform:broker-1") */
+  authorityId: string;
+  /** The authority's public key (PEM) for verifying this endorsement */
+  authorityPublicKey: string;
+  /** What the authority is attesting (e.g., "member-of:acme-org", "vetted-agent") */
+  claim: string;
+  /** Authority's signature over: persistentId + publicKey + claim */
+  signature: string;
+  /** When the endorsement was issued (ISO 8601) */
+  issuedAt: string;
+  /** When the endorsement expires (ISO 8601, optional) */
+  expiresAt?: string;
 }
 
 /** Request to delegate capabilities to a child agent */
@@ -221,6 +278,27 @@ export interface DelegationRequest {
    * Can only be equal or more restrictive than parent.
    */
   federation?: Partial<FederationMetadata>;
+
+  /**
+   * Whether to inherit parent's persistent identity (default: true)
+   * When true, child token carries parent's persistent identity binding.
+   * When false, persistent identity is cleared.
+   */
+  inheritPersistentIdentity?: boolean;
+
+  /**
+   * Override persistent identity for the child (optional)
+   * If provided, the child gets its own persistent identity instead of
+   * inheriting from the parent. Useful when sub-agents have their own identity.
+   */
+  persistentIdentity?: {
+    persistentId: string;
+    identityType: string;
+    proof?: string;
+    challenge?: string;
+    publicKey?: string;
+    endorsements?: AuthorityEndorsement[];
+  };
 }
 
 /**
@@ -251,6 +329,20 @@ export interface CreateRootTokenParams {
   federation?: FederationMetadata;
   /** Agent-level capabilities (optional) - spawn, message, etc. */
   agentCapabilities?: AgentCapabilities;
+
+  // ==========================================================================
+  // Persistent Identity
+  // ==========================================================================
+
+  /** Persistent identity to bind to this token */
+  persistentIdentity?: {
+    persistentId: string;
+    identityType: string;
+    proof?: string;
+    challenge?: string;
+    publicKey?: string;
+    endorsements?: AuthorityEndorsement[];
+  };
 }
 
 /** Result of token verification */
