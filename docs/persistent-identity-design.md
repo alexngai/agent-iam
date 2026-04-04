@@ -634,7 +634,7 @@ Verification:
 | **Key management** | Agent owns private key | Broker owns shared secret |
 | **Best for** | Cross-system, remote services | Local/internal, broker-mediated |
 
-Platform (HMAC) identities intentionally cannot be verified standalone — this is a fundamental property of symmetric cryptography. For remote verification scenarios, keypair identities are required.
+Platform (HMAC) identities intentionally cannot be verified standalone — this is a fundamental property of symmetric cryptography. When `createRootTokenWithIdentity()` is called with a platform identity, the token's `publicKey` field will be `undefined` (since HMAC has no public key). This means `verifyIdentityProof()` will reject the token — use `Broker.verifyTokenIdentity()` instead. For remote verification scenarios where the verifier has no broker access, keypair identities are required.
 
 ### Standalone Verifier API
 

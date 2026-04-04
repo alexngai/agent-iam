@@ -302,7 +302,10 @@ export class Broker {
     // 3. Prove the caller controls the identity (Ed25519 sign or HMAC)
     const identityProof = await this.identityService.proveIdentity(persistentId, challenge);
 
-    // 4. Extract public key from identity metadata
+    // 4. Extract public key from identity metadata.
+    // For keypair identities, this is the Ed25519 public key (enables standalone verification).
+    // For platform (HMAC) identities, publicKey will be undefined — these identities
+    // can only be verified via Broker.verifyTokenIdentity(), not standalone.
     const publicKey = (identity.metadata.publicKey as string) ?? undefined;
 
     // 5. Embed proof + public key in the token — self-certifying

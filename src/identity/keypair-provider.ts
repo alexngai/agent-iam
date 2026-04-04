@@ -115,10 +115,18 @@ export class KeypairIdentityProvider implements IdentityProvider {
     }
 
     const privateKeyPem = fs.readFileSync(keyPath, "utf-8");
-    const privateKey = crypto.createPrivateKey(privateKeyPem);
 
-    // Sign the challenge with Ed25519
-    const signature = crypto.sign(null, Buffer.from(challenge), privateKey);
+    let signature: Buffer;
+    try {
+      const privateKey = crypto.createPrivateKey(privateKeyPem);
+      signature = crypto.sign(null, Buffer.from(challenge), privateKey);
+    } catch (err) {
+      throw new Error(
+        `Failed to sign with private key for identity ${persistentId}: key may be corrupted. ` +
+        `Consider revoking and recreating the identity. ` +
+        `(${err instanceof Error ? err.message : String(err)})`
+      );
+    }
 
     return {
       persistentId,
@@ -140,15 +148,20 @@ export class KeypairIdentityProvider implements IdentityProvider {
     const publicKeyPem = identity.metadata.publicKey as string;
     if (!publicKeyPem) return false;
 
-    const publicKey = crypto.createPublicKey(publicKeyPem);
-    const signatureBuffer = Buffer.from(proof.proof, "base64url");
-
-    return crypto.verify(null, Buffer.from(challenge), publicKey, signatureBuffer);
+    try {
+      const publicKey = crypto.createPublicKey(publicKeyPem);
+      const signatureBuffer = Buffer.from(proof.proof, "base64url");
+      return crypto.verify(null, Buffer.from(challenge), publicKey, signatureBuffer);
+    } catch {
+      return false;
+    }
   }
 
   async revoke(persistentId: string): Promise<void> {
     const fingerprint = this.extractFingerprint(persistentId);
-    if (!fingerprint) return;
+    if (!fingerprint) {
+      throw new Error(`Invalid keypair identity format: ${persistentId} (must start with "key:")`);
+    }
 
     const keyPath = path.join(this.identityDir, `${fingerprint}.key`);
     const metaPath = path.join(this.identityDir, `${fingerprint}.json`);

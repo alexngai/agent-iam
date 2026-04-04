@@ -213,6 +213,14 @@ identityCmd
   .option("--type <type>", "Identity type: keypair or platform", "keypair")
   .option("--label <label>", "Human-readable label for this identity")
   .action(async (options) => {
+    const validTypes = ["keypair", "platform"];
+    if (!validTypes.includes(options.type)) {
+      console.error(
+        `Error: Invalid identity type "${options.type}". Must be one of: ${validTypes.join(", ")}`
+      );
+      process.exit(1);
+    }
+
     const broker = new Broker();
 
     try {

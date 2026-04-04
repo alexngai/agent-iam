@@ -142,14 +142,18 @@ export class PlatformIdentityProvider implements IdentityProvider {
   }
 
   async revoke(persistentId: string): Promise<void> {
+    if (!persistentId.startsWith("platform:")) {
+      throw new Error(`Invalid platform identity format: ${persistentId} (must start with "platform:")`);
+    }
     const registry = this.loadRegistry();
     const record = registry.identities[persistentId];
-    if (record) {
-      record.revoked = true;
-      // Zero out the secret
-      record.secret = "";
-      this.saveRegistry(registry);
+    if (!record) {
+      throw new Error(`Platform identity not found: ${persistentId}`);
     }
+    record.revoked = true;
+    // Zero out the secret
+    record.secret = "";
+    this.saveRegistry(registry);
   }
 
   /**
@@ -173,7 +177,19 @@ export class PlatformIdentityProvider implements IdentityProvider {
       return { identities: {} };
     }
     const content = fs.readFileSync(this.registryPath, "utf-8");
-    return JSON.parse(content) as PlatformRegistry;
+    try {
+      const parsed = JSON.parse(content) as PlatformRegistry;
+      if (!parsed.identities || typeof parsed.identities !== "object") {
+        throw new Error("missing identities field");
+      }
+      return parsed;
+    } catch (err) {
+      throw new Error(
+        `Platform identity registry is corrupted at ${this.registryPath}: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Back up the file and delete it to reset, or fix the JSON manually.`
+      );
+    }
   }
 
   private saveRegistry(registry: PlatformRegistry): void {

@@ -1056,4 +1056,312 @@ describe("Authority endorsements", () => {
     assert.strictEqual(secondContact.persistentId, storedPersistentId);
     assert.strictEqual(secondContact.publicKey, storedPublicKey);
   });
+
+  test("platform identity standalone verification gives helpful error", async () => {
+    const identity = await broker.createIdentity({ type: "platform" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "platform-agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+    // Platform identity has no public key, so the error tells the user they can't verify without broker
+    assert.ok(result.error!.includes("cannot verify without broker"));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// ERROR PATH TESTS
+// ─────────────────────────────────────────────────────────────────
+
+describe("Error handling and edge cases", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-iam-errors-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // --- KeypairIdentityProvider error paths ---
+
+  test("keypair prove() with corrupted private key gives clear error", async () => {
+    const provider = new KeypairIdentityProvider(tmpDir);
+    const identity = await provider.create();
+    const fingerprint = identity.persistentId.slice(4);
+
+    // Corrupt the private key file
+    const keyPath = path.join(tmpDir, "identities", `${fingerprint}.key`);
+    fs.writeFileSync(keyPath, "this is not a valid PEM key");
+
+    await assert.rejects(
+      () => provider.prove(identity.persistentId, "challenge"),
+      (err: Error) => {
+        assert.ok(err.message.includes("Failed to sign"));
+        assert.ok(err.message.includes("corrupted"));
+        return true;
+      }
+    );
+  });
+
+  test("keypair verify() with corrupted public key returns false", async () => {
+    const provider = new KeypairIdentityProvider(tmpDir);
+    const identity = await provider.create();
+    const challenge = "test-challenge";
+    const proof = await provider.prove(identity.persistentId, challenge);
+
+    // Corrupt the metadata file's public key
+    const fingerprint = identity.persistentId.slice(4);
+    const metaPath = path.join(tmpDir, "identities", `${fingerprint}.json`);
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    meta.metadata.publicKey = "not a valid PEM";
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+
+    const valid = await provider.verify(proof, challenge);
+    assert.strictEqual(valid, false);
+  });
+
+  test("keypair revoke() throws on invalid persistentId format", async () => {
+    const provider = new KeypairIdentityProvider(tmpDir);
+
+    await assert.rejects(
+      () => provider.revoke("invalid-id"),
+      /must start with "key:"/
+    );
+  });
+
+  test("keypair revoke() succeeds silently when key files are already gone", async () => {
+    const provider = new KeypairIdentityProvider(tmpDir);
+    const identity = await provider.create();
+
+    // Manually delete the key files
+    const fingerprint = identity.persistentId.slice(4);
+    fs.unlinkSync(path.join(tmpDir, "identities", `${fingerprint}.key`));
+    fs.unlinkSync(path.join(tmpDir, "identities", `${fingerprint}.json`));
+
+    // Should not throw
+    await provider.revoke(identity.persistentId);
+  });
+
+  // --- PlatformIdentityProvider error paths ---
+
+  test("platform loadRegistry() throws on corrupted JSON", async () => {
+    const provider = new PlatformIdentityProvider(tmpDir, "test");
+
+    // Create the identities directory and write corrupted JSON
+    const dir = path.join(tmpDir, "identities");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "platform-registry.json"), "{{not json!!");
+
+    await assert.rejects(
+      () => provider.list(),
+      /corrupted/
+    );
+  });
+
+  test("platform loadRegistry() throws on JSON missing identities field", async () => {
+    const provider = new PlatformIdentityProvider(tmpDir, "test");
+
+    const dir = path.join(tmpDir, "identities");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "platform-registry.json"), '{"foo": "bar"}');
+
+    await assert.rejects(
+      () => provider.list(),
+      /corrupted/
+    );
+  });
+
+  test("platform revoke() throws on invalid persistentId format", async () => {
+    const provider = new PlatformIdentityProvider(tmpDir, "test");
+
+    await assert.rejects(
+      () => provider.revoke("key:something"),
+      /must start with "platform:"/
+    );
+  });
+
+  test("platform revoke() throws on unknown identity", async () => {
+    const provider = new PlatformIdentityProvider(tmpDir, "test");
+
+    await assert.rejects(
+      () => provider.revoke("platform:nonexistent-uuid"),
+      /not found/
+    );
+  });
+
+  // --- createEndorsement validation ---
+
+  test("createEndorsement throws on empty authorityId", () => {
+    assert.throws(
+      () => createEndorsement("", "key", "key", "id", "pk", "claim"),
+      /authorityId is required/
+    );
+  });
+
+  test("createEndorsement throws on empty claim", () => {
+    assert.throws(
+      () => createEndorsement("auth", "key", "key", "id", "pk", ""),
+      /claim is required/
+    );
+  });
+
+  test("createEndorsement throws on invalid private key", () => {
+    assert.throws(
+      () => createEndorsement("auth", "not-a-key", "not-a-key", "id", "pk", "claim"),
+      /invalid authority private key/
+    );
+  });
+
+  // --- Delegation identity inheritance edge cases ---
+
+  test("delegation with inheritPersistentIdentity false clears identity", async () => {
+    const service = new IdentityService({ defaultType: "keypair" });
+    service.registerProvider(new KeypairIdentityProvider(tmpDir));
+    const tokenService = new TokenService(generateSecret());
+
+    const identity = await service.createIdentity({ type: "keypair" });
+    const parent = tokenService.createRootToken({
+      agentId: "parent",
+      scopes: ["github:repo:read"],
+      persistentIdentity: {
+        persistentId: identity.persistentId,
+        identityType: identity.identityType,
+      },
+    });
+
+    const child = tokenService.delegate(parent, {
+      agentId: "child",
+      requestedScopes: ["github:repo:read"],
+      inheritPersistentIdentity: false,
+    });
+
+    assert.strictEqual(child.persistentIdentity, undefined);
+  });
+
+  // --- Standalone verifier edge cases ---
+
+  test("standalone verifier rejects token with publicKey but no proof", () => {
+    const broker = new Broker(tmpDir);
+    const token = broker.createRootToken({
+      agentId: "agent",
+      scopes: ["github:repo:read"],
+      persistentIdentity: {
+        persistentId: "key:fakefingerprint",
+        identityType: "keypair",
+        publicKey: "-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----",
+        // proof and challenge intentionally omitted
+      },
+    });
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+    assert.ok(result.error!.includes("no proof or challenge"));
+  });
+
+  test("standalone verifier handles malformed base64url signature gracefully", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Replace proof with something that's valid base64url but not a valid signature
+    token.persistentIdentity!.proof = "AAAA";
+
+    const result = verifyIdentityProof(token);
+    assert.strictEqual(result.valid, false);
+  });
+
+  test("keypair serialization round-trip with publicKey and endorsements", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    // Add a fake endorsement
+    const authorityKeypair = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const endorsement = createEndorsement(
+      "test-authority",
+      authorityKeypair.privateKey,
+      authorityKeypair.publicKey,
+      identity.persistentId,
+      token.persistentIdentity!.publicKey!,
+      "test-claim"
+    );
+    token.persistentIdentity!.endorsements = [endorsement];
+
+    // Serialize and deserialize
+    const serialized = JSON.stringify(token);
+    const deserialized = JSON.parse(serialized);
+
+    assert.ok(deserialized.persistentIdentity.publicKey);
+    assert.ok(deserialized.persistentIdentity.publicKey.includes("BEGIN PUBLIC KEY"));
+    assert.strictEqual(deserialized.persistentIdentity.endorsements.length, 1);
+    assert.strictEqual(deserialized.persistentIdentity.endorsements[0].claim, "test-claim");
+  });
+
+  test("multiple endorsements with mix of expired and valid", async () => {
+    const broker = new Broker(tmpDir);
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"] },
+      identity.persistentId
+    );
+
+    const auth = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const validEndorsement = createEndorsement(
+      "authority", auth.privateKey, auth.publicKey,
+      identity.persistentId, token.persistentIdentity!.publicKey!,
+      "valid-claim",
+      new Date(Date.now() + 86400000).toISOString() // expires tomorrow
+    );
+    const expiredEndorsement = createEndorsement(
+      "authority", auth.privateKey, auth.publicKey,
+      identity.persistentId, token.persistentIdentity!.publicKey!,
+      "expired-claim",
+      new Date(Date.now() - 1000).toISOString() // already expired
+    );
+    token.persistentIdentity!.endorsements = [validEndorsement, expiredEndorsement];
+
+    const result = verifyIdentityProof(token, {
+      trustedAuthorities: { "authority": auth.publicKey },
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.verifiedEndorsements!.length, 1);
+    assert.strictEqual(result.verifiedEndorsements![0].claim, "valid-claim");
+  });
+
+  test("refresh preserves persistentIdentity with publicKey", async () => {
+    const broker = new Broker(tmpDir);
+    const tokenService = new TokenService(generateSecret());
+    const identity = await broker.createIdentity({ type: "keypair" });
+    const token = await broker.createRootTokenWithIdentity(
+      { agentId: "agent", scopes: ["github:repo:read"], ttlDays: 1 },
+      identity.persistentId
+    );
+
+    const newExpiry = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+    const refreshed = tokenService.createRefreshedToken(token, newExpiry);
+
+    assert.ok(refreshed.persistentIdentity);
+    assert.strictEqual(refreshed.persistentIdentity!.persistentId, identity.persistentId);
+    assert.ok(refreshed.persistentIdentity!.publicKey);
+    assert.ok(refreshed.persistentIdentity!.proof);
+    assert.strictEqual(refreshed.expiresAt, newExpiry);
+  });
 });

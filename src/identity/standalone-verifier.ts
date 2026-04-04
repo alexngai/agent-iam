@@ -129,7 +129,10 @@ export function verifyIdentityProof(
     // This is a fundamental limitation of symmetric crypto — the verifier needs the same secret.
     return {
       valid: false,
-      error: `Identity type "${identityType}" cannot be verified standalone (requires broker access for symmetric key verification)`,
+      error: `Identity type "${identityType}" cannot be verified standalone — ` +
+        `symmetric (HMAC) identities require broker access for verification. ` +
+        `Use a keypair identity for standalone/remote verification, ` +
+        `or use Broker.verifyTokenIdentity() for broker-mediated verification.`,
     };
   }
 
@@ -184,12 +187,28 @@ export function createEndorsement(
   claim: string,
   expiresAt?: string
 ): AuthorityEndorsement {
+  // Validate inputs
+  if (!authorityId) throw new Error("authorityId is required");
+  if (!authorityPrivateKey) throw new Error("authorityPrivateKey is required");
+  if (!authorityPublicKey) throw new Error("authorityPublicKey is required");
+  if (!agentPersistentId) throw new Error("agentPersistentId is required");
+  if (!agentPublicKey) throw new Error("agentPublicKey is required");
+  if (!claim) throw new Error("claim is required");
+
   // The signed payload: persistentId + publicKey + claim
   // This binds the endorsement to a specific agent identity and claim
   const payload = `${agentPersistentId}\n${agentPublicKey}\n${claim}`;
 
-  const privateKeyObj = crypto.createPrivateKey(authorityPrivateKey);
-  const signature = crypto.sign(null, Buffer.from(payload), privateKeyObj);
+  let signature: Buffer;
+  try {
+    const privateKeyObj = crypto.createPrivateKey(authorityPrivateKey);
+    signature = crypto.sign(null, Buffer.from(payload), privateKeyObj);
+  } catch (err) {
+    throw new Error(
+      `Failed to sign endorsement: invalid authority private key. ` +
+      `(${err instanceof Error ? err.message : String(err)})`
+    );
+  }
 
   return {
     authorityId,

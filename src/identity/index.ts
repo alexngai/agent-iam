@@ -33,3 +33,6 @@ export type {
   AgentResource,
   AgentResourceRegistry,
 } from "./types.js";
+
+// Re-export token-level types related to identity
+export type { AuthorityEndorsement } from "../types.js";
