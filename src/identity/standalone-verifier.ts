@@ -119,8 +119,8 @@ export function verifyIdentityProof(
   }
 
   // 4. Verify the proof (Ed25519 signature over the challenge)
-  //    Both keypair and attested (SPIFFE) identities use Ed25519 signatures.
-  if (identityType === "keypair" || identityType === "attested") {
+  //    Keypair, attested (SPIFFE), and decentralized (DID:web) identities all use Ed25519.
+  if (identityType === "keypair" || identityType === "attested" || identityType === "decentralized") {
     try {
       const pubKeyObj = crypto.createPublicKey(publicKey);
       const signatureBuffer = Buffer.from(proof, "base64url");
