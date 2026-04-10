@@ -91,6 +91,12 @@ export {
   createVcEndorsement,
   computeVcSigningPayload,
   canonicalize,
+  InMemoryTrustStore,
+  TrustScorer,
+  createAttestation,
+  signAttestation,
+  verifyAttestation,
+  DEFAULT_SCORING_CONFIG,
 } from "./identity/index.js";
 export type {
   IdentityType,
@@ -110,6 +116,8 @@ export type {
   TrustAttestation,
   TrustScore,
   TrustStore,
+  TrustScoringConfig,
+  InMemoryTrustStoreOptions,
   AgentResourceType,
   AgentResource,
   AgentResourceRegistry,

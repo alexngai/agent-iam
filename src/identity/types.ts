@@ -145,8 +145,12 @@ export interface TrustScore {
   persistentId: string;
   /** Overall trust level */
   level: "unknown" | "low" | "medium" | "high";
+  /** Numeric score (0–1) for finer-grained decisions than level */
+  numericScore: number;
   /** Total number of (non-expired) attestations */
   attestationCount: number;
+  /** Number of distinct attesters (for diversity signal) */
+  attesterCount: number;
   /** Breakdown by claim type */
   breakdown: Record<string, { count: number; avgScore?: number }>;
   /** When the score was last computed */

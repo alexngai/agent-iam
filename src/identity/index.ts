@@ -25,6 +25,20 @@ export {
   createVcEndorsement,
   computeVcSigningPayload,
 } from "./standalone-verifier.js";
+
+// Trust store
+export {
+  InMemoryTrustStore,
+  TrustScorer,
+  createAttestation,
+  signAttestation,
+  verifyAttestation,
+  DEFAULT_SCORING_CONFIG,
+} from "./trust-store.js";
+export type {
+  TrustScoringConfig,
+  InMemoryTrustStoreOptions,
+} from "./trust-store.js";
 export type {
   StandaloneVerificationResult,
   VerifiedEndorsement,
