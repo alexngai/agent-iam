@@ -85,6 +85,8 @@ export {
   FileSchemaPinRegistry,
   MemorySchemaPinRegistry,
   verifyToolSchema,
+  checkMCPCall,
+  formatDecision,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -92,6 +94,8 @@ export type {
   PinnedTool,
   SchemaPinRegistry,
   SchemaVerification,
+  Decision,
+  CheckMCPCallOptions,
 } from "./mcp/index.js";
 
 // Persistent identity

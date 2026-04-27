@@ -24,3 +24,6 @@ export type {
   SchemaPinRegistry,
   SchemaVerification,
 } from "./schema-pin.js";
+
+export { checkMCPCall, formatDecision } from "./policy.js";
+export type { Decision, CheckMCPCallOptions } from "./policy.js";
