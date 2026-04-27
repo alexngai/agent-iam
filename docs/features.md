@@ -269,8 +269,6 @@ New runtime dependencies, all MIT or Apache-2.0, all from authoritative sources:
 
 ### Build order
 
-0. **Picomatch swap** in `src/token.ts` — smallest, isolated, fixes a latent
-   bug class. Lands independently with its own tests.
 1. **Tool-schema TOFU** (`src/mcp/schema-pin.ts`) — highest leverage; reuses
    `jcs.ts`; storage layer is well-understood from existing identity TOFU.
 2. **Scope namespace + `checkMCPCall`** (`src/mcp/policy.ts`) — wire up
@@ -280,6 +278,14 @@ New runtime dependencies, all MIT or Apache-2.0, all from authoritative sources:
 5. **Optional server-identity bindings** (`src/mcp/server-trust.ts`) — adds
    `@sigstore/verify`, `ajv`, vendored schema.
 6. **CLI surface, reference harness, docs.**
+
+**Deferred: picomatch swap.** Earlier sketch listed this as "step 0, fixes a
+latent bug class." On inspection the current matcher is sound: `scopeMatches`
+in `src/token.ts:37-57` is pure segment-based string ops with no regex, and
+`resourceMatches` at `src/token.ts:60-71` properly escapes metachars before
+glob substitution. The current `resourceMatches` also lets `*` span `/`
+(see `token.test.ts:80`); picomatch's default semantics would break that.
+Revisit only if a real need emerges (brace expansion, negation patterns).
 
 ### Open questions
 

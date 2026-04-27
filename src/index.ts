@@ -79,6 +79,21 @@ export {
   isLegacyEndorsement,
 } from "./types.js";
 
+// MCP access control
+export {
+  canonicalToolHash,
+  FileSchemaPinRegistry,
+  MemorySchemaPinRegistry,
+  verifyToolSchema,
+} from "./mcp/index.js";
+export type {
+  MCPTool,
+  MCPToolAnnotations,
+  PinnedTool,
+  SchemaPinRegistry,
+  SchemaVerification,
+} from "./mcp/index.js";
+
 // Persistent identity
 export {
   IdentityService,
