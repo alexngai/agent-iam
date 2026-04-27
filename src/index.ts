@@ -87,6 +87,8 @@ export {
   verifyToolSchema,
   checkMCPCall,
   formatDecision,
+  issueMCPCredential,
+  verifyMCPCredential,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -96,6 +98,10 @@ export type {
   SchemaVerification,
   Decision,
   CheckMCPCallOptions,
+  IssueMCPCredentialOptions,
+  MCPCredential,
+  VerifyMCPCredentialOptions,
+  VerifiedMCPCredential,
 } from "./mcp/index.js";
 
 // Persistent identity

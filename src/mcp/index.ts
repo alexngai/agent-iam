@@ -27,3 +27,11 @@ export type {
 
 export { checkMCPCall, formatDecision } from "./policy.js";
 export type { Decision, CheckMCPCallOptions } from "./policy.js";
+
+export { issueMCPCredential, verifyMCPCredential } from "./credential.js";
+export type {
+  IssueMCPCredentialOptions,
+  MCPCredential,
+  VerifyMCPCredentialOptions,
+  VerifiedMCPCredential,
+} from "./credential.js";
