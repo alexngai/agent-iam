@@ -1,7 +1,7 @@
 # Agent IAM — Feature Roadmap
 
 **Status:** Active
-**Last Updated:** 2026-04-27
+**Last Updated:** 2026-04-27 (W1 revised with MCP threat-landscape research)
 
 This document tracks in-flight feature workstreams. Each section captures the
 design we've agreed on, the scope, the planned API surface, and open questions.
@@ -25,7 +25,7 @@ For background on the existing system, see `docs/design.md` and
 
 ## Workstream 1 — MCP Tool Access Control
 
-**Status:** Proposed
+**Status:** Proposed (revised post-research)
 **Owner:** _unassigned_
 **Depends on:** none
 **Sequence:** ship first
@@ -34,83 +34,282 @@ For background on the existing system, see `docs/design.md` and
 
 Agents that use MCP servers can invoke arbitrary tools exposed by those servers.
 Today agent-iam has no vocabulary for restricting which MCP tools an agent may
-call. The threat model is **prompt injection / jailbreak of the LLM**: the
-harness around the model is trusted, but the model's tool-call decisions are
-not. We need a signed, attenuatable policy that the harness can consult before
-dispatching each tool call.
+call. The primary threat model is **prompt injection / jailbreak of the LLM**:
+the harness around the model is trusted, but the model's tool-call decisions
+are not.
+
+The April 2026 research surfaced two threats not in the original framing:
+
+- **Tool rug-pulls** (CVE-2025-54136 and the broader pattern). Servers ship
+  benign tools at first connection then silently swap to malicious payloads.
+  The MCP spec's `tools/list_changed` notification is optional and doesn't
+  mandate re-consent. Defenders converged on SHA-256 pinning of canonical tool
+  definitions (mcp-scan, mcp-guardian).
+- **Token replay across servers.** OAuth tokens without an `aud` claim can be
+  replayed by any MCP server that receives them. The MCP authorization spec
+  (2025-11-25) **MUSTs** RFC 8707 audience binding. Without it, a compromised
+  filesystem server can reuse our credentials against any other resource.
+
+W1 ships a coherent defense: signed allow/deny policy + tool-schema TOFU pinning
++ optional server identity verification + RFC 8707 audience binding on
+broker-issued credentials destined for MCP servers.
 
 ### Design summary
 
-- **Enforcement seam: the agent harness, not agent-iam, not the MCP server.**
-  Agent-iam distributes signed policy; the harness enforces inline before
-  dispatching tool calls. This matches how Claude Code's own permission system
-  works.
-- **No MCP proxy.** Building protocol-aware infrastructure inside the broker
-  is the wrong layer. Defer until/unless we have multi-tenant / untrusted-agent
-  scenarios.
-- **New scope namespace:** `mcp:<server>:<tool>:invoke`. Reuses the existing
-  scope + glob-constraint machinery, so allow-listing comes for free.
-- **New `denyScopes` field on `AgentToken`.** Deny always wins; the deny set
-  grows monotonically down the delegation chain (union, not intersection).
-  This deliberately breaks pure attenuation — we accept the tradeoff because
-  org-wide "never allow shell tools" requires it.
-- **Reference helper:** `checkMCPCall(token, server, tool, args) → Decision`,
-  a pure function harnesses call before dispatching.
+#### Enforcement model
+
+- **Enforcement seam: the agent harness**, not agent-iam, not the MCP server.
+  Agent-iam distributes signed policy and verification helpers; the harness
+  enforces inline before dispatching tool calls. Matches Claude Code's own
+  permission model.
+- **No MCP proxy in v1.** Out-of-process gating is the wrong layer for a
+  credential broker. Revisit if we ever serve untrusted agent code.
+
+#### Allow / deny scopes
+
+- **New scope namespace:** `mcp:<server>:<tool>` (3 segments, matching the
+  existing `provider:resource:action` grammar). Tool name is the leaf —
+  MCP tools are atomic by protocol design, no `:invoke` suffix needed.
+- **No `denyScopes` field on tokens in v1.** Per-token deny breaks pure
+  attenuation and the realistic use cases ("grant `*` minus shell") are
+  better served by org-wide policy. Use enumerated allow lists per token.
+- **Broker-level deny policy** (`mcpDenyPolicy: string[]` in broker config) —
+  the SCP analog. Org admin sets once; injected into every `checkMCPCall`
+  evaluation; cannot be widened by any token. Clean separation: per-token
+  allow says "what this agent may do," broker deny says "what nobody may
+  ever do."
+- **Three-state `Decision`** — `allow | deny | ask`, matching Claude Code's
+  `deny → ask → allow` precedence (the de facto industry standard).
+  `ask` lets harnesses surface human-in-the-loop prompts. v1 broker doesn't
+  emit tokens that produce `ask`, but defining it now is free.
+- **Default-deny once opted in.** Tokens with no `mcp:*` scopes get all MCP
+  calls denied. Migration helper adds `mcp:*:*` to existing tokens for
+  backwards compatibility (opt-out, not opt-in).
+
+#### Tool-schema TOFU (rug-pull defense)
+
+Mirrors the existing TOFU pattern in `src/identity/standalone-verifier.ts` —
+verifier records `(identifier, hash-of-canonical-data)` on first contact,
+compares on subsequent contacts.
+
+| Identity TOFU (today) | MCP tool-schema TOFU (new) |
+|---|---|
+| identifier = `did:key:...` | identifier = `(server-name, tool-name)` |
+| canonical data = public key | canonical data = full `Tool` object |
+| canonicalization = `src/identity/jcs.ts` | canonicalization = same `jcs.ts` |
+| storage = remote service's choice | storage = harness's choice |
+| trust progression = authority endorsement | trust progression = MCP Registry / sigstore endorsement |
+
+On schema mismatch the helper returns `ask` (or `deny` in strict mode). The
+storage layer is harness-owned by default; broker can offer a shared registry
+for multi-agent setups but is not the source of truth.
+
+#### Server identity (optional, opt-in)
+
+MCP servers are **not principals in agent-iam's identity graph** — they're
+external services we need to recognize. The right abstraction is the
+trusted-party pattern (mirror of `trustedAuthorities` in
+`standalone-verifier.ts:79-80`), not a new `IdentityProvider`.
+
+Three stackable verification paths, each optional:
+
+1. **Hash-pin** — `sha256` of the server tarball/binary; cheapest.
+2. **Registry-anchored** — fetch `server.json` from the official MCP Registry
+   (Sep 2025), validate against vendored schema with `ajv`, compare canonical
+   URI.
+3. **Sigstore-attested** — verify provenance bundle with `@sigstore/verify`,
+   check builder identity matches expected publisher.
+
+Tokens carry `mcpServerBindings: Record<string, MCPServerBinding>`. Default
+is empty = trust local config (current behavior). Hardened deployments
+populate the field.
+
+#### RFC 8707 audience binding
+
+When `Broker.issueFromProvider()` produces a credential destined for an MCP
+server, the resulting token includes `aud = <canonical server URI>`. Resource
+servers reject tokens whose `aud` doesn't match. Three attacks this prevents:
+
+1. **Token-passing / confused deputy** — server A can't replay a token at
+   server B.
+2. **Compromised-server exfil** — credentials leaked from a compromised MCP
+   server are useless against other servers.
+3. **Cross-tenant token reuse** — multi-tenant brokers can't accidentally
+   issue cross-tenant-replayable tokens.
+
+Implementation: `jose.SignJWT().setAudience(uri)` on issuance,
+`jose.jwtVerify(t, k, { audience })` on verification. Cost: ~one line each.
+The canonical URI comes from the server-identity binding above — these
+features compose into one defense.
+
+#### Annotation-aware policy primitives
+
+Tool annotations (`destructiveHint`, `openWorldHint`, `readOnlyHint`,
+`idempotentHint`) are **advisory only** — untrusted servers can lie. But they
+work as policy *inputs* for trusted servers. v1 ships:
+
+- `requireApprovalIf("destructiveHint")` — return `ask` for destructive tools.
+- `denyIf("openWorldHint")` — block open-world tools entirely (lethal-trifecta
+  primitive).
+
+Session-state policy ("block open-world after sensitive read") is v2 — it
+introduces session state we don't have today.
 
 ### API surface (planned)
 
 ```ts
 // src/types.ts
+interface MCPServerBinding {
+  canonicalURI: string;            // for RFC 8707 aud claim
+  registry?: string;               // MCP Registry name, e.g. "io.github.org/server"
+  sha256?: string;                 // tarball/binary hash
+  sigstoreBundle?: string;         // base64 sigstore bundle
+}
+
 interface AgentToken {
   // ...existing fields
-  denyScopes?: string[];  // NEW: deny patterns, win over allow
+  mcpServerBindings?: Record<string, MCPServerBinding>;
 }
 
 // src/mcp/policy.ts (new)
 type Decision =
-  | { allow: true }
-  | { allow: false; reason: string };
+  | { kind: "allow"; matchedScope: string }
+  | { kind: "deny"; reason: string; matchedScope?: string }
+  | { kind: "ask"; reason: string };
 
 function checkMCPCall(
   token: AgentToken,
   server: string,
   tool: string,
-  args?: unknown,
+  args?: unknown,                  // unused in v1; reserved for v2
+  context?: { brokerDenyPolicy?: string[]; toolAnnotations?: ToolAnnotations },
 ): Decision;
+
+// src/mcp/schema-pin.ts (new)
+function canonicalToolHash(tool: Tool): string;
+
+interface SchemaPinRegistry {
+  get(server: string, tool: string): Promise<string | undefined>;
+  set(server: string, tool: string, hash: string): Promise<void>;
+}
+
+class FileSchemaPinRegistry implements SchemaPinRegistry {
+  constructor(dir?: string);       // defaults to ~/.agent-credentials/mcp-pins/
+}
+
+function verifyToolSchema(
+  server: string,
+  tool: Tool,
+  registry: SchemaPinRegistry,
+): Promise<{ valid: boolean; drift?: { knownHash: string; currentHash: string } }>;
+
+// src/mcp/server-trust.ts (new)
+function verifyServerIdentity(
+  binding: MCPServerBinding,
+  observedManifest: { uri: string; sha256?: string; bundle?: string },
+): Promise<{ valid: boolean; error?: string }>;
 ```
 
 ### Type / code changes
 
-- `src/types.ts` — add `denyScopes?: string[]` to `AgentToken`.
-- `src/token.ts` — `checkPermission()` evaluates deny-scopes first; deny
-  matches return `false` regardless of allow matches. `mergeScopes()` /
-  delegation logic unions deny lists, intersects allow lists.
-- `src/mcp/policy.ts` (new) — `checkMCPCall()` helper.
+- `src/token.ts:36-71` — **replace hand-rolled regex matcher with `picomatch`**
+  (step 0, fixes a latent bug class around regex metachars in tool names).
+- `src/types.ts` — add `MCPServerBinding`, `mcpServerBindings?` on
+  `AgentToken`. Pull `Tool`, `ToolAnnotations` types from
+  `@modelcontextprotocol/sdk/types.js`.
+- `src/broker.ts` — broker config gains `mcpDenyPolicy: string[]`. New
+  `Broker.issueForMCPServer({ binding, scopes, ... })` emits JOSE-signed JWT
+  with RFC 8707 `aud`.
+- `src/mcp/policy.ts` (new) — `checkMCPCall()`, three-state `Decision`,
+  default-deny semantics, broker-deny override.
+- `src/mcp/schema-pin.ts` (new) — `canonicalToolHash()` (uses existing
+  `src/identity/jcs.ts`), `SchemaPinRegistry` interface,
+  `FileSchemaPinRegistry`, `verifyToolSchema()`.
+- `src/mcp/server-trust.ts` (new) — `MCPServerBinding`, `verifyServerIdentity()`,
+  registry/sigstore verification paths.
+- `src/mcp/annotations.ts` (new) — `requireApprovalIf`, `denyIf` primitives.
 - `src/mcp/index.ts` (new) — public exports.
-- `src/cli.ts` — `agent-iam mcp allow|deny <pattern>` for ergonomic policy edit.
-- Tests: `src/mcp/policy.test.ts`, plus extensions to `src/token.test.ts` for
-  deny-precedence and deny-union-on-delegation.
+- `src/cli.ts` — `agent-iam mcp allow <pattern>`, `agent-iam mcp pin <server>`,
+  `agent-iam mcp test <tokenId> <server> <tool>` (dry-run), `agent-iam mcp list
+  <tokenId>` (introspection).
+- `schemas/server-<DATE>.schema.json` (vendored) — pin to a dated snapshot
+  of the official MCP Registry schema.
+- Tests: `src/mcp/*.test.ts` per module; `src/token.test.ts` extensions for
+  picomatch parity.
+- `docs/mcp-policy.md` — contract for harness integrators, server-identity
+  caveat, migration path.
+- `examples/mcp-harness/` — minimal reference harness wiring
+  `checkMCPCall` + schema TOFU + RFC 8707 verification.
+
+### Libraries (decided)
+
+New runtime dependencies, all MIT or Apache-2.0, all from authoritative sources:
+
+| Library | Use | Source |
+|---|---|---|
+| `@modelcontextprotocol/sdk` (v1.x) | `Tool`, `ToolAnnotations`, JSON-RPC types — types-only subpath import; transports excluded | Anthropic / MCP org |
+| `picomatch` | Replace hand-rolled regex matcher in `src/token.ts` | micromatch org |
+| `jose` | JWT issue/verify with `aud` (RFC 8707) | panva |
+| `oauth4webapi` | RFC 9728 PRM discovery (lazy — only if we integrate external authz servers) | panva |
+| `@sigstore/verify` | Verify provenance bundles for server identity | Sigstore community |
+| `ajv` (with `Ajv2020`) + `ajv-formats` | Validate `server.json` against vendored 2020-12 schema | ajv-validator |
+
+**Skipped (have working in-tree equivalents):**
+
+- `canonicalize` (RFC 8785 JCS) — `src/identity/jcs.ts` already implements
+  the ASCII-safe subset we need. Validate against published RFC 8785 test
+  vectors before relying further.
+- `openid-client` — too much surface; `oauth4webapi` covers what we need.
+
+**Build ourselves:**
+
+- `server.json` schema loader (~30 LOC, vendor + ajv).
+- Tool-schema TOFU lockfile (~150 LOC; closest prior art `mcptrust` is Go and
+  pins names not definitions, leaving the rug-pull window open).
+
+### Build order
+
+0. **Picomatch swap** in `src/token.ts` — smallest, isolated, fixes a latent
+   bug class. Lands independently with its own tests.
+1. **Tool-schema TOFU** (`src/mcp/schema-pin.ts`) — highest leverage; reuses
+   `jcs.ts`; storage layer is well-understood from existing identity TOFU.
+2. **Scope namespace + `checkMCPCall`** (`src/mcp/policy.ts`) — wire up
+   default-deny, broker-deny override, three-state Decision.
+3. **RFC 8707 audience binding** — adds `jose`; minimal `Broker.issueForMCPServer`.
+4. **Annotation primitives** (`src/mcp/annotations.ts`) — small surface.
+5. **Optional server-identity bindings** (`src/mcp/server-trust.ts`) — adds
+   `@sigstore/verify`, `ajv`, vendored schema.
+6. **CLI surface, reference harness, docs.**
 
 ### Open questions
 
-- **Wildcard semantics on deny.** Does `mcp:*:write:*` match a tool literally
-  named `write` only, or any tool whose name contains `write`? Lean toward
-  strict segment matching (current scope behavior).
-- **Server identity.** How does the harness know which "server" string to
-  pass to `checkMCPCall`? Probably the MCP server name from the harness's
-  config, but we should document this contract clearly.
-- **Tool argument inspection.** Should `args` factor into decisions
-  (e.g., deny `filesystem:read` for paths outside `/workspace`)? V2;
-  start with name-based gating only.
-- **Reference harness.** Ship one as an example, or just document the
-  contract? Lean toward a minimal example in `examples/mcp-harness/`.
+- **Schema migration timing.** When we ship default-deny, every existing
+  token without `mcp:*` scopes gets locked out of MCP. Roll the migration
+  helper into the same release? Yes — but document the breaking change
+  prominently.
+- **Sigstore trust roots.** High-level `sigstore` package fetches TUF roots
+  over the network; offline path uses `@sigstore/verify` with pre-fetched
+  root. Pick before coding the server-trust module.
+- **`server.json` schema versioning.** Pin to a single dated snapshot or
+  support multiple? V1: pin one, document upgrade path.
+- **Cross-server policy** (e.g., "this agent may use server A *or* server B
+  in a session, not both") — not handled anywhere in the ecosystem.
+  Genuine design freedom but defer to v2.
+- **`tools/list_changed` re-consent.** The MCP spec doesn't mandate
+  re-prompting on tool list changes. Our schema TOFU detects the drift;
+  what should the harness do? Document `ask` as the recommended response.
 
-### Out of scope
+### Out of scope (v1)
 
 - MCP proxy / out-of-process gate.
-- Argument-level policy (defer to v2).
+- Per-token `denyScopes` (use broker-level deny + enumerated allow instead).
+- Argument-level policy (extension point reserved in `checkMCPCall` signature).
+- Session-state policy / lethal-trifecta tripwires.
+- Cross-server combination policy.
+- SEP-990 Cross App Access integration (overlaps with W3).
+- Async task lifecycle / elicitation handling.
 - MCP server-side token verification (servers can already use
-  `standalone-verifier.ts` if they want; not required).
+  `standalone-verifier.ts`; not required).
 
 ---
 
@@ -324,7 +523,13 @@ These were considered and rejected — recorded so we don't relitigate.
   Revisit only if we need org-wide gating across untrusted agents.
 - **Agent-to-agent impersonation.** The original "act as another agent"
   framing. Real need was human OBO — see Workstream 3.
-- **Argument-level MCP policy.** Tool name gating only in v1.
+- **Argument-level MCP policy.** Tool name gating only in v1; the `args`
+  parameter is reserved on `checkMCPCall` for v2.
+- **Per-token MCP `denyScopes`.** Earlier sketch had this; replaced by
+  broker-level deny policy + enumerated allow lists. Revisit only if a real
+  use case appears.
+- **MCP session-state policy** (lethal-trifecta tripwires). v2; requires
+  session state we don't have.
 - **Broker-hosted human authentication.** We federate to OIDC IdPs, never
   authenticate users directly.
 
@@ -342,8 +547,10 @@ W2 (JIT elevation)  ─────► ship
 W3 (Human OBO)  design doc ─► ship
 ```
 
-**W1 first** because it's the smallest, has the most concrete user need,
-and its `denyScopes` decision sets a precedent the other workstreams reuse.
+**W1 first** because it's the most concrete user need and its decisions set
+patterns the other workstreams reuse: the picomatch swap, the scope
+vocabulary, RFC 8707 audience binding (referenced by W3), and the schema-TOFU
+pattern (mirroring identity TOFU).
 
 **W2 second** because elevation reuses the scope vocabulary expanded in W1
 and is largely self-contained.
