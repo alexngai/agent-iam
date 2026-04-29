@@ -91,6 +91,9 @@ export {
   verifyMCPCredential,
   requireApprovalIf,
   denyIf,
+  verifyServerIdentity,
+  artifactSha256,
+  validateServerManifest,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -105,6 +108,13 @@ export type {
   VerifyMCPCredentialOptions,
   VerifiedMCPCredential,
   AnnotationHint,
+  MCPServerBinding,
+  ObservedServerManifest,
+  SigstoreVerifier,
+  VerifyServerIdentityOptions,
+  ServerTrustCheckResult,
+  ServerTrustVerification,
+  ServerManifest,
 } from "./mcp/index.js";
 
 // Persistent identity

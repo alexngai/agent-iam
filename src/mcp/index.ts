@@ -38,3 +38,16 @@ export type {
 
 export { requireApprovalIf, denyIf } from "./annotations.js";
 export type { AnnotationHint } from "./annotations.js";
+
+export { verifyServerIdentity, artifactSha256 } from "./server-trust.js";
+export type {
+  MCPServerBinding,
+  ObservedServerManifest,
+  SigstoreVerifier,
+  VerifyServerIdentityOptions,
+  ServerTrustCheckResult,
+  ServerTrustVerification,
+} from "./server-trust.js";
+
+export { validateServerManifest } from "./server-schema.js";
+export type { ServerManifest } from "./server-schema.js";
