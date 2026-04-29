@@ -5,6 +5,7 @@
 import { test, describe, before } from "node:test";
 import * as assert from "node:assert";
 import * as crypto from "crypto";
+import { SignJWT, importPKCS8 } from "jose";
 import { issueMCPCredential, verifyMCPCredential } from "./credential.js";
 import type { AgentToken } from "../types.js";
 
@@ -172,6 +173,38 @@ describe("verifyMCPCredential — happy path", () => {
     } else {
       assert.fail(`expected valid, got: ${v.error}`);
     }
+  });
+
+  test("accepts array-form `aud` claim (RFC 7519 spec compliance)", async () => {
+    // Regression for review finding M1: third-party brokers may issue tokens
+    // with multi-audience claims; we must accept those when the expected
+    // audience appears in the array.
+    const key = await importPKCS8(signingKey, "EdDSA");
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await new SignJWT({ scope: "mcp:fs:read" })
+      .setProtectedHeader({ alg: "EdDSA" })
+      .setIssuer("broker")
+      .setSubject("agent-1")
+      .setAudience(["https://fs", "https://fs-replica"]) // array form
+      .setIssuedAt(now)
+      .setExpirationTime(now + 60)
+      .sign(key);
+
+    const v = await verifyMCPCredential(jwt, {
+      publicKey,
+      expectedAudience: "https://fs",
+    });
+    assert.strictEqual(v.valid, true);
+    if (v.valid) {
+      assert.strictEqual(v.audience, "https://fs");
+    }
+
+    // And ensure mismatched audience still fails on multi-aud tokens.
+    const bad = await verifyMCPCredential(jwt, {
+      publicKey,
+      expectedAudience: "https://shell",
+    });
+    assert.strictEqual(bad.valid, false);
   });
 
   test("issuer match is enforced when expectedIssuer is set", async () => {

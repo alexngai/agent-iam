@@ -187,6 +187,18 @@ describe("verifyServerIdentity — hash path", () => {
     assert.strictEqual(r.valid, true);
   });
 
+  test("fails (does not throw) when binding hash length differs from observed", async () => {
+    // Pre-fix bug: crypto.timingSafeEqual throws RangeError on unequal lengths,
+    // surfacing as an unhandled rejection rather than a valid:false result.
+    const r = await verifyServerIdentity(
+      { canonicalURI: URI, sha256: "abc" },
+      { uri: URI, artifactSha256: expectedHash }
+    );
+    assert.strictEqual(r.valid, false);
+    const hash = r.checks.find((c) => c.path === "hash");
+    assert.match(hash?.error ?? "", /sha256 mismatch/);
+  });
+
   test("fails when observed hash differs (rug-pulled binary)", async () => {
     const tampered = artifactSha256(Buffer.concat([tarball, Buffer.from("X")]));
     const r = await verifyServerIdentity(

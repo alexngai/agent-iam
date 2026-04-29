@@ -167,8 +167,13 @@ export async function verifyMCPCredential(
   if (typeof payload.sub !== "string") {
     return { valid: false, error: "Missing or invalid `sub` claim" };
   }
-  if (typeof payload.aud !== "string") {
-    return { valid: false, error: "Missing or non-string `aud` claim" };
+  // RFC 7519 allows `aud` to be a string OR a string array. jose has already
+  // verified the expectedAudience appears in either form by this point.
+  const audIsString = typeof payload.aud === "string";
+  const audIsStringArray =
+    Array.isArray(payload.aud) && payload.aud.every((a) => typeof a === "string");
+  if (!audIsString && !audIsStringArray) {
+    return { valid: false, error: "Missing or invalid `aud` claim" };
   }
   if (typeof payload.iss !== "string") {
     return { valid: false, error: "Missing `iss` claim" };
@@ -180,11 +185,13 @@ export async function verifyMCPCredential(
     return { valid: false, error: "Missing or non-string `scope` claim" };
   }
 
+  // Report the expected audience as the matched one — jose has already
+  // verified it appears in payload.aud (whether string or array form).
   return {
     valid: true,
     agentId: payload.sub,
     scopes: payload.scope.split(" ").filter((s) => s.length > 0),
-    audience: payload.aud,
+    audience: options.expectedAudience,
     issuer: payload.iss,
     expiresAt: new Date(payload.exp * 1000).toISOString(),
     ...(Array.isArray(payload.act) ? { act: payload.act as string[] } : {}),

@@ -149,12 +149,10 @@ export async function verifyServerIdentity(
         valid: false,
         error: "Binding requires sha256 but no artifact hash was observed",
       });
-    } else if (
-      !crypto.timingSafeEqual(
-        Buffer.from(binding.sha256.toLowerCase()),
-        Buffer.from(observed.artifactSha256.toLowerCase())
-      )
-    ) {
+    } else if (!hashesMatch(binding.sha256, observed.artifactSha256)) {
+      // Length-guard before timing-safe compare: timingSafeEqual throws
+      // RangeError on length-mismatched buffers, which would surface as an
+      // unhandled rejection rather than a `valid: false` result.
       checks.push({
         path: "hash",
         valid: false,
@@ -215,4 +213,12 @@ export async function verifyServerIdentity(
 export function artifactSha256(data: Buffer | string): string {
   const buf = typeof data === "string" ? Buffer.from(data) : data;
   return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+/** Constant-time hash compare with a pre-check on length to avoid throwing. */
+function hashesMatch(a: string, b: string): boolean {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  if (x.length !== y.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(x), Buffer.from(y));
 }

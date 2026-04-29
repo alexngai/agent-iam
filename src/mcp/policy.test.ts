@@ -170,6 +170,36 @@ describe("checkMCPCall — broker-level deny policy", () => {
   });
 });
 
+describe("checkMCPCall — server/tool name validation", () => {
+  // Regression for review finding C2: with a colon in server or tool, the
+  // built target has >3 segments and interacts unsafely with wildcard match.
+  test("rejects server name containing `:`", () => {
+    const token = tokenWith(["mcp:*"]);
+    const d = checkMCPCall(token, "fs:evil", "tool");
+    assert.strictEqual(d.kind, "deny");
+    if (d.kind === "deny") assert.match(d.reason, /Invalid MCP server name/);
+  });
+
+  test("rejects tool name containing `:`", () => {
+    const token = tokenWith(["mcp:*"]);
+    const d = checkMCPCall(token, "fs", "evil:tool");
+    assert.strictEqual(d.kind, "deny");
+    if (d.kind === "deny") assert.match(d.reason, /Invalid MCP tool name/);
+  });
+
+  test("rejects empty server name", () => {
+    const token = tokenWith(["mcp:*"]);
+    const d = checkMCPCall(token, "", "tool");
+    assert.strictEqual(d.kind, "deny");
+  });
+
+  test("rejects empty tool name", () => {
+    const token = tokenWith(["mcp:*"]);
+    const d = checkMCPCall(token, "fs", "");
+    assert.strictEqual(d.kind, "deny");
+  });
+});
+
 describe("checkMCPCall — args reserved", () => {
   test("v1 ignores args; identical decision regardless", () => {
     const token = tokenWith(["mcp:filesystem:read_file"]);

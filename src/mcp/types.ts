@@ -22,12 +22,18 @@ export interface MCPToolAnnotations {
 }
 
 /**
- * An MCP tool exposed by a server. Subset of the MCP `Tool` type — the
- * fields that affect what the tool does or how the model is told to use it.
+ * An MCP tool exposed by a server. Mirrors the wire form of the MCP `Tool`
+ * type — every field that affects what the tool does or how the model is
+ * told to use it. Unknown fields are preserved (and hashed by
+ * `canonicalToolHash`) so server-defined extensions can't drift past
+ * rug-pull detection.
  */
 export interface MCPTool {
   name: string;
   description?: string;
   inputSchema: object;
+  outputSchema?: object;
   annotations?: MCPToolAnnotations;
+  /** Forward-compat: extension fields the spec may add, plus _meta. */
+  [key: string]: unknown;
 }

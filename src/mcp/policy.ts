@@ -68,6 +68,15 @@ export function checkMCPCall(
   args?: unknown,
   options?: CheckMCPCallOptions
 ): Decision {
+  // Reject names that would break the 3-segment scope grammar. A `:` in
+  // server or tool would build a 4+-segment target string and silently
+  // change wildcard-match behavior.
+  if (!server || server.includes(":")) {
+    return { kind: "deny", reason: `Invalid MCP server name: '${server}'` };
+  }
+  if (!tool || tool.includes(":")) {
+    return { kind: "deny", reason: `Invalid MCP tool name: '${tool}'` };
+  }
   const target = `mcp:${server}:${tool}`;
 
   if (options?.brokerDenyPolicy) {

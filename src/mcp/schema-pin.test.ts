@@ -71,6 +71,26 @@ describe("canonicalToolHash", () => {
     assert.notStrictEqual(canonicalToolHash(baseTool), canonicalToolHash(annotated));
   });
 
+  // Regression for review finding H2: hash must cover outputSchema and
+  // unknown extension fields, not just a 4-field projection.
+  test("differs when outputSchema changes (rug-pull through output drift)", () => {
+    const a: MCPTool = { ...baseTool, outputSchema: { type: "string" } };
+    const b: MCPTool = { ...baseTool, outputSchema: { type: "object" } };
+    assert.notStrictEqual(canonicalToolHash(a), canonicalToolHash(b));
+  });
+
+  test("differs when arbitrary unknown fields change (forward-compat)", () => {
+    const a: MCPTool = { ...baseTool, _meta: { version: 1 } };
+    const b: MCPTool = { ...baseTool, _meta: { version: 2 } };
+    assert.notStrictEqual(canonicalToolHash(a), canonicalToolHash(b));
+  });
+
+  test("differs when adding an unknown field to a previously plain tool", () => {
+    const plain: MCPTool = { ...baseTool };
+    const extended: MCPTool = { ...baseTool, somethingNew: "payload" };
+    assert.notStrictEqual(canonicalToolHash(plain), canonicalToolHash(extended));
+  });
+
   test("is insensitive to key order in inputSchema (JCS property)", () => {
     const a: MCPTool = {
       name: "x",
