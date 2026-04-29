@@ -498,6 +498,69 @@ program
   });
 
 // ─────────────────────────────────────────────────────────────────
+// MCP COMMANDS
+// ─────────────────────────────────────────────────────────────────
+
+import {
+  checkMCPCall,
+  formatDecision,
+  FileSchemaPinRegistry,
+} from "./mcp/index.js";
+
+const mcpCmd = program.command("mcp").description("MCP access-control utilities");
+
+mcpCmd
+  .command("test <server> <tool>")
+  .description("Dry-run a checkMCPCall against a token (logs decision, no side effects)")
+  .requiredOption("--token <token>", "Serialized agent token")
+  .option("--broker-deny <pattern...>", "Org-wide deny patterns to apply")
+  .action((server: string, tool: string, options) => {
+    const broker = new Broker();
+    try {
+      const token = broker.deserializeToken(options.token);
+      const decision = checkMCPCall(token, server, tool, undefined, {
+        brokerDenyPolicy: options.brokerDeny,
+      });
+      console.log(formatDecision(decision));
+      process.exit(decision.kind === "allow" ? 0 : decision.kind === "ask" ? 2 : 1);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command("pin-list")
+  .description("List all MCP tool-schema pins on this broker")
+  .option("--server <name>", "Filter to a specific server")
+  .action(async (options) => {
+    const registry = new FileSchemaPinRegistry();
+    const entries = await registry.list(options.server);
+    if (entries.length === 0) {
+      console.log("(no pins)");
+      return;
+    }
+    for (const e of entries) {
+      console.log(`${e.server}\t${e.tool}\t${e.pin.hash}\t${e.pin.pinnedAt}`);
+    }
+  });
+
+mcpCmd
+  .command("pin-clear <server> [tool]")
+  .description("Remove an MCP tool-schema pin (next call re-pins via TOFU)")
+  .action(async (server: string, tool: string | undefined) => {
+    const registry = new FileSchemaPinRegistry();
+    if (tool) {
+      await registry.delete(server, tool);
+      console.log(`cleared pin for ${server}/${tool}`);
+    } else {
+      const entries = await registry.list(server);
+      for (const e of entries) await registry.delete(e.server, e.tool);
+      console.log(`cleared ${entries.length} pin(s) for ${server}`);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
 // DISTRIBUTED MODE COMMANDS
 // ─────────────────────────────────────────────────────────────────
 

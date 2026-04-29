@@ -25,10 +25,27 @@ For background on the existing system, see `docs/design.md` and
 
 ## Workstream 1 — MCP Tool Access Control
 
-**Status:** Proposed (revised post-research)
+**Status:** Shipped (v1, 2026-04-29)
 **Owner:** _unassigned_
 **Depends on:** none
 **Sequence:** ship first
+
+**Shipped on branch `claude/agent-iam-access-research-n38yi`:**
+
+| Step | Module | Tests | Commit |
+|---|---|---|---|
+| 1. Tool-schema TOFU | `src/mcp/schema-pin.ts` | 31 | `f913b32` |
+| 2. Allow/deny scope policy | `src/mcp/policy.ts` | 22 | `1ca0d82` |
+| 3. RFC 8707 audience binding | `src/mcp/credential.ts` | 17 | `8f04e6e` |
+| 4. Annotation primitives | `src/mcp/annotations.ts` | 17 | `585eb41` |
+| 5. Server identity verification | `src/mcp/server-trust.ts`, `server-schema.ts` | 27 | `c145cae` |
+| 6. CLI + reference harness + docs | `src/cli.ts` (mcp commands), `examples/mcp-harness/`, `docs/mcp-policy.md` | (manual) | (this commit) |
+
+**Deferred:** picomatch swap (no real bug class to fix); broker integration for
+`Broker.issueForMCPServer()` (pure functions ship; broker plumbing is follow-up
+work that doesn't change the contract); vendoring the dated official
+`server.json` schema for full conformance (current structural check is
+sufficient for v1).
 
 ### Motivation
 
