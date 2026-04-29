@@ -90,18 +90,19 @@ broker-issued credentials destined for MCP servers.
 - **No `denyScopes` field on tokens in v1.** Per-token deny breaks pure
   attenuation and the realistic use cases ("grant `*` minus shell") are
   better served by org-wide policy. Use enumerated allow lists per token.
-- **Broker-level deny policy** (`mcpDenyPolicy: string[]` in broker config) —
-  the SCP analog. Org admin sets once; injected into every `checkMCPCall`
-  evaluation; cannot be widened by any token. Clean separation: per-token
-  allow says "what this agent may do," broker deny says "what nobody may
-  ever do."
+- **Broker-level deny policy** (passed as `CheckMCPCallOptions.brokerDenyPolicy`
+  from the harness) — the SCP analog. Cannot be widened by any token.
+  Clean separation: per-token allow says "what this agent may do," broker
+  deny says "what nobody may ever do." (v1 ships the API surface; storing
+  the policy in `Broker` config and a CLI to manage it is follow-up work.)
 - **Three-state `Decision`** — `allow | deny | ask`, matching Claude Code's
   `deny → ask → allow` precedence (the de facto industry standard).
   `ask` lets harnesses surface human-in-the-loop prompts. v1 broker doesn't
   emit tokens that produce `ask`, but defining it now is free.
 - **Default-deny once opted in.** Tokens with no `mcp:*` scopes get all MCP
-  calls denied. Migration helper adds `mcp:*:*` to existing tokens for
-  backwards compatibility (opt-out, not opt-in).
+  calls denied. Migration is manual: re-mint tokens with `mcp:*` (the
+  canonical "all MCP" pattern — note `mcp:*:*` does *not* work, see
+  scope-namespace gotcha in `docs/mcp-policy.md`).
 
 #### Tool-schema TOFU (rug-pull defense)
 
@@ -227,30 +228,39 @@ function verifyServerIdentity(
 ): Promise<{ valid: boolean; error?: string }>;
 ```
 
-### Type / code changes
+### Type / code changes (as shipped)
 
-- `src/token.ts:36-71` — **replace hand-rolled regex matcher with `picomatch`**
-  (step 0, fixes a latent bug class around regex metachars in tool names).
-- `src/types.ts` — add `MCPServerBinding`, `mcpServerBindings?` on
-  `AgentToken`. Pull `Tool`, `ToolAnnotations` types from
-  `@modelcontextprotocol/sdk/types.js`.
-- `src/broker.ts` — broker config gains `mcpDenyPolicy: string[]`. New
-  `Broker.issueForMCPServer({ binding, scopes, ... })` emits JOSE-signed JWT
-  with RFC 8707 `aud`.
+- `src/token.ts:36-57` — `scopeMatches` fixed for the mid-wildcard
+  short-circuit bug discovered in post-W1 review (`*` is now a
+  single-segment wildcard with segment-count enforcement).
+- `src/mcp/types.ts` (new) — local `MCPTool`, `MCPToolAnnotations` (we
+  defer adding `@modelcontextprotocol/sdk` until we depend on more than
+  the type surface; swap is a one-import change).
 - `src/mcp/policy.ts` (new) — `checkMCPCall()`, three-state `Decision`,
-  default-deny semantics, broker-deny override.
+  default-deny semantics, broker-deny override (broker policy passed via
+  `CheckMCPCallOptions.brokerDenyPolicy` rather than stored in `Broker`
+  config).
+- `src/mcp/credential.ts` (new) — `issueMCPCredential` /
+  `verifyMCPCredential` pure functions for RFC 8707 audience-bound JWTs.
+  `Broker.issueForMCPServer()` integration is deferred follow-up work.
 - `src/mcp/schema-pin.ts` (new) — `canonicalToolHash()` (uses existing
   `src/identity/jcs.ts`), `SchemaPinRegistry` interface,
-  `FileSchemaPinRegistry`, `verifyToolSchema()`.
-- `src/mcp/server-trust.ts` (new) — `MCPServerBinding`, `verifyServerIdentity()`,
-  registry/sigstore verification paths.
+  `FileSchemaPinRegistry`, `MemorySchemaPinRegistry`, `verifyToolSchema()`.
+- `src/mcp/server-trust.ts` (new) — `MCPServerBinding`,
+  `verifyServerIdentity()`, three optional verification paths
+  (hash-pin, registry-anchored via vendored minimal `server-schema.ts`,
+  and an injected `SigstoreVerifier` interface).
 - `src/mcp/annotations.ts` (new) — `requireApprovalIf`, `denyIf` primitives.
 - `src/mcp/index.ts` (new) — public exports.
-- `src/cli.ts` — `agent-iam mcp allow <pattern>`, `agent-iam mcp pin <server>`,
-  `agent-iam mcp test <tokenId> <server> <tool>` (dry-run), `agent-iam mcp list
-  <tokenId>` (introspection).
-- `schemas/server-<DATE>.schema.json` (vendored) — pin to a dated snapshot
-  of the official MCP Registry schema.
+- `src/cli.ts` — `agent-iam mcp test <server> <tool> --token <t> [--broker-deny <pat...>]`,
+  `agent-iam mcp pin-list [--server <name>]`,
+  `agent-iam mcp pin-clear <server> [tool]`.
+- `examples/mcp-harness/` — reference dispatch wrapper, demo, README.
+- `docs/mcp-policy.md` — integrator contract.
+
+Vendoring a dated official `server.json` schema for stronger
+conformance is deferred — `src/mcp/server-schema.ts` ships a permissive
+structural check that's sufficient for v1.
 - Tests: `src/mcp/*.test.ts` per module; `src/token.test.ts` extensions for
   picomatch parity.
 - `docs/mcp-policy.md` — contract for harness integrators, server-identity
@@ -306,10 +316,10 @@ Revisit only if a real need emerges (brace expansion, negation patterns).
 
 ### Open questions
 
-- **Schema migration timing.** When we ship default-deny, every existing
-  token without `mcp:*` scopes gets locked out of MCP. Roll the migration
-  helper into the same release? Yes — but document the breaking change
-  prominently.
+- **Schema migration timing.** Tokens without `mcp:*` scopes are now
+  default-denied for MCP calls. v1 documents this as a manual re-mint
+  rather than shipping an automated helper. Worth revisiting if real
+  deployments accumulate stale tokens.
 - **Sigstore trust roots.** High-level `sigstore` package fetches TUF roots
   over the network; offline path uses `@sigstore/verify` with pre-fetched
   root. Pick before coding the server-trust module.

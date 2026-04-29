@@ -31,6 +31,11 @@ export interface HarnessConfig {
   trustedServersForAnnotations?: Set<string>;
   /** Schema-pin storage backend. */
   pinRegistry: SchemaPinRegistry;
+  /**
+   * If true (default), unrecognized tools are auto-pinned on first sight
+   * (TOFU). If false, only previously-pinned tools are accepted.
+   */
+  tofu?: boolean;
   /** Stub for the actual MCP tool invocation. */
   invokeTool: (server: string, tool: string, args: unknown) => Promise<unknown>;
   /** Stub for surfacing an `ask` decision to a human. Returns true if approved. */
@@ -64,7 +69,8 @@ export async function dispatchToolCall(
   const target = `${serverName}/${toolDef.name}`;
 
   // 1. Schema TOFU.
-  const pin = await verifyToolSchema(serverName, toolDef, cfg.pinRegistry);
+  const tofu = cfg.tofu ?? true;
+  const pin = await verifyToolSchema(serverName, toolDef, cfg.pinRegistry, { tofu });
   if (!pin.valid) {
     if (pin.drift) {
       log(`tool=${target} schema-drift known=${pin.drift.knownHash.slice(0, 8)} current=${pin.drift.currentHash.slice(0, 8)}`);
@@ -80,8 +86,14 @@ export async function dispatchToolCall(
       }
       // User-approved drift: re-pin to the new hash.
       await cfg.pinRegistry.set(serverName, toolDef.name, pin.drift.currentHash);
+      log(`tool=${target} schema-repinned current=${pin.drift.currentHash.slice(0, 8)}`);
     } else {
-      throw new SchemaDriftError(`Tool ${target} not pinned (strict mode)`, "", "");
+      // Strict mode (cfg.tofu === false) and the tool was never pinned.
+      throw new SchemaDriftError(
+        `Tool ${target} not pinned (strict mode)`,
+        "",
+        ""
+      );
     }
   }
 

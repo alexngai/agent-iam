@@ -165,10 +165,14 @@ escalate but never relax — a `deny` from the policy layer is sticky.
 Run **once per server, at connection time** (not per tool call). Three
 stackable opt-in checks:
 
+In evaluation order:
+
 - **URI match** (always-on) — observed URI must match `binding.canonicalURI`.
-- **Hash-pin** — observed `artifactSha256` must match `binding.sha256`.
+  Mismatch short-circuits all other checks.
 - **Registry-anchored** — observed `server.json` validates and its `name`
   matches `binding.registry`.
+- **Hash-pin** — observed `artifactSha256` must match `binding.sha256`
+  (length-checked before the timing-safe compare).
 - **Sigstore** — provenance bundle verified by an injected
   `SigstoreVerifier`. Wire `@sigstore/verify` yourself.
 
@@ -237,6 +241,23 @@ Recommended schema:
 `Decision` always carries enough context to log meaningfully: `allow`
 includes `matchedScope`; `deny` includes `reason` and (when applicable)
 the matched deny pattern; `ask` includes `reason`.
+
+---
+
+## CLI
+
+For local debugging:
+
+```
+agent-iam mcp test --token <serialized> [--broker-deny <pattern>...] <server> <tool>
+agent-iam mcp pin-list [--server <name>]
+agent-iam mcp pin-clear <server> [tool]
+```
+
+`mcp test` exit codes encode the decision:
+- `0` — allow
+- `1` — deny
+- `2` — ask
 
 ---
 
