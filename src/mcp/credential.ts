@@ -73,6 +73,9 @@ export async function issueMCPCredential(
   if (!options.serverURI) {
     throw new Error("issueMCPCredential: serverURI is required (RFC 8707 audience)");
   }
+  if (!options.issuer) {
+    throw new Error("issueMCPCredential: issuer is required");
+  }
 
   for (const requested of options.scopes) {
     const allowed = options.agentToken.scopes.some((p) => scopeMatches(p, requested));
@@ -154,6 +157,10 @@ export async function verifyMCPCredential(
   try {
     const result = await jwtVerify(jwt, key, {
       audience: options.expectedAudience,
+      // Explicit algorithm pin — defense against alg-confusion attacks
+      // (e.g., a token forged with `alg: "none"` or `alg: "HS256"` against
+      // our public key as if it were an HMAC secret).
+      algorithms: [ALG],
       ...(options.expectedIssuer ? { issuer: options.expectedIssuer } : {}),
     });
     payload = result.payload;

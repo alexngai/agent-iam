@@ -143,7 +143,13 @@ export async function verifyServerIdentity(
 
   // 3. Hash-pin — opt-in.
   if (binding.sha256 !== undefined) {
-    if (!observed.artifactSha256) {
+    if (!HEX64.test(binding.sha256)) {
+      checks.push({
+        path: "hash",
+        valid: false,
+        error: `Invalid sha256 format in binding (expected 64 hex chars): '${binding.sha256}'`,
+      });
+    } else if (!observed.artifactSha256) {
       checks.push({
         path: "hash",
         valid: false,
@@ -222,3 +228,6 @@ function hashesMatch(a: string, b: string): boolean {
   if (x.length !== y.length) return false;
   return crypto.timingSafeEqual(Buffer.from(x), Buffer.from(y));
 }
+
+/** SHA-256 in hex form: exactly 64 hex chars. */
+const HEX64 = /^[0-9a-fA-F]{64}$/;

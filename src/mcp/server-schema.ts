@@ -27,20 +27,22 @@ export interface ServerManifest {
   [key: string]: unknown;
 }
 
+// String maxLength bounds defend against memory-exhaustion attacks via
+// maliciously inflated manifests. The values are generous but bounded.
 const SERVER_MANIFEST_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   required: ["name", "version"],
   properties: {
-    name: { type: "string", minLength: 1 },
-    version: { type: "string", minLength: 1 },
-    description: { type: "string" },
+    name: { type: "string", minLength: 1, maxLength: 256 },
+    version: { type: "string", minLength: 1, maxLength: 64 },
+    description: { type: "string", maxLength: 4096 },
     repository: {
       type: "object",
       required: ["url"],
       properties: {
-        url: { type: "string", minLength: 1 },
-        source: { type: "string" },
+        url: { type: "string", minLength: 1, maxLength: 2048 },
+        source: { type: "string", maxLength: 64 },
       },
     },
   },

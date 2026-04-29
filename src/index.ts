@@ -94,6 +94,7 @@ export {
   verifyServerIdentity,
   artifactSha256,
   validateServerManifest,
+  CorruptPinFileError,
 } from "./mcp/index.js";
 export type {
   MCPTool,

@@ -73,6 +73,20 @@ describe("issueMCPCredential", () => {
     );
   });
 
+  test("rejects empty issuer (must be set for audit chain)", async () => {
+    await assert.rejects(
+      () =>
+        issueMCPCredential({
+          agentToken: tokenWith(["mcp:fs:read"]),
+          serverURI: "https://fs",
+          scopes: ["mcp:fs:read"],
+          signingKey,
+          issuer: "",
+        }),
+      /issuer is required/
+    );
+  });
+
   test("rejects empty serverURI (no audience to bind to)", async () => {
     await assert.rejects(
       () =>
@@ -341,6 +355,59 @@ describe("verifyMCPCredential — RFC 8707 attack scenarios", () => {
     const tampered = parts.join(".");
 
     const v = await verifyMCPCredential(tampered, {
+      publicKey,
+      expectedAudience: "https://fs",
+    });
+    assert.strictEqual(v.valid, false);
+  });
+
+  test("rejects alg=none tokens (alg-confusion defense)", async () => {
+    // Manually craft an unsigned JWT.
+    const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+    const now = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(
+      JSON.stringify({
+        sub: "agent-1",
+        aud: "https://fs",
+        iss: "broker",
+        iat: now,
+        exp: now + 60,
+        scope: "mcp:fs:read",
+      })
+    ).toString("base64url");
+    const jwt = `${header}.${payload}.`; // empty signature
+
+    const v = await verifyMCPCredential(jwt, {
+      publicKey,
+      expectedAudience: "https://fs",
+    });
+    assert.strictEqual(v.valid, false);
+  });
+
+  test("rejects HS256-signed tokens (alg-confusion defense)", async () => {
+    // Attacker tries to use the published EdDSA public key as if it were
+    // an HMAC secret — a classic alg-confusion attack.
+    const header = Buffer.from(
+      JSON.stringify({ alg: "HS256", typ: "JWT" })
+    ).toString("base64url");
+    const now = Math.floor(Date.now() / 1000);
+    const payload = Buffer.from(
+      JSON.stringify({
+        sub: "agent-1",
+        aud: "https://fs",
+        iss: "broker",
+        iat: now,
+        exp: now + 60,
+        scope: "mcp:fs:read",
+      })
+    ).toString("base64url");
+    const sig = crypto
+      .createHmac("sha256", publicKey)
+      .update(`${header}.${payload}`)
+      .digest("base64url");
+    const jwt = `${header}.${payload}.${sig}`;
+
+    const v = await verifyMCPCredential(jwt, {
       publicKey,
       expectedAudience: "https://fs",
     });

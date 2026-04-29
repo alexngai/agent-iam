@@ -18,6 +18,7 @@ export {
   FileSchemaPinRegistry,
   MemorySchemaPinRegistry,
   verifyToolSchema,
+  CorruptPinFileError,
 } from "./schema-pin.js";
 export type {
   PinnedTool,

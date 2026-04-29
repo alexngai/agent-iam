@@ -62,6 +62,20 @@ describe("validateServerManifest", () => {
       assert.fail("expected valid");
     }
   });
+
+  test("rejects oversized name (memory-exhaustion defense)", () => {
+    const r = validateServerManifest({ name: "x".repeat(257), version: "1.0" });
+    assert.strictEqual(r.valid, false);
+  });
+
+  test("rejects oversized description", () => {
+    const r = validateServerManifest({
+      name: "x",
+      version: "1.0",
+      description: "y".repeat(4097),
+    });
+    assert.strictEqual(r.valid, false);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -191,12 +205,34 @@ describe("verifyServerIdentity — hash path", () => {
     // Pre-fix bug: crypto.timingSafeEqual throws RangeError on unequal lengths,
     // surfacing as an unhandled rejection rather than a valid:false result.
     const r = await verifyServerIdentity(
-      { canonicalURI: URI, sha256: "abc" },
+      { canonicalURI: URI, sha256: "a".repeat(64) },
       { uri: URI, artifactSha256: expectedHash }
     );
     assert.strictEqual(r.valid, false);
     const hash = r.checks.find((c) => c.path === "hash");
     assert.match(hash?.error ?? "", /sha256 mismatch/);
+  });
+
+  test("rejects malformed sha256 in binding (not 64-char hex)", async () => {
+    // 'abc' is too short and isn't hex of the right length. Used to crash
+    // on timingSafeEqual; now reported as an explicit invalid-format error.
+    const r = await verifyServerIdentity(
+      { canonicalURI: URI, sha256: "abc" },
+      { uri: URI, artifactSha256: expectedHash }
+    );
+    assert.strictEqual(r.valid, false);
+    const hash = r.checks.find((c) => c.path === "hash");
+    assert.match(hash?.error ?? "", /Invalid sha256 format/);
+  });
+
+  test("rejects sha256 in binding with non-hex characters", async () => {
+    const r = await verifyServerIdentity(
+      { canonicalURI: URI, sha256: "z".repeat(64) },
+      { uri: URI, artifactSha256: expectedHash }
+    );
+    assert.strictEqual(r.valid, false);
+    const hash = r.checks.find((c) => c.path === "hash");
+    assert.match(hash?.error ?? "", /Invalid sha256 format/);
   });
 
   test("fails when observed hash differs (rug-pulled binary)", async () => {

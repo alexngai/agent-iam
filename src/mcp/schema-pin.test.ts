@@ -12,6 +12,7 @@ import {
   FileSchemaPinRegistry,
   MemorySchemaPinRegistry,
   verifyToolSchema,
+  CorruptPinFileError,
 } from "./schema-pin.js";
 import type { MCPTool } from "./types.js";
 
@@ -219,6 +220,43 @@ describe("FileSchemaPinRegistry", () => {
     const stat = fs.statSync(file);
     const mode = stat.mode & 0o777;
     assert.strictEqual(mode, 0o600);
+  });
+
+  test("throws CorruptPinFileError on garbage JSON (no silent re-pin)", async () => {
+    // Write malformed JSON to the pin file. Auto-recovery (silent re-pin)
+    // would defeat rug-pull detection; we must surface the corruption.
+    await registry.set("fs", "read", "h");
+    const file = path.join(tmpDir, `${encodeURIComponent("fs")}.json`);
+    fs.writeFileSync(file, "{ this is not valid JSON");
+
+    await assert.rejects(
+      () => registry.get("fs", "read"),
+      (err: Error) => err instanceof CorruptPinFileError && err.path === file
+    );
+  });
+
+  test("CorruptPinFileError carries path and cause", async () => {
+    await registry.set("fs", "read", "h");
+    const file = path.join(tmpDir, `${encodeURIComponent("fs")}.json`);
+    fs.writeFileSync(file, "garbage");
+
+    try {
+      await registry.get("fs", "read");
+      assert.fail("expected throw");
+    } catch (err) {
+      assert.ok(err instanceof CorruptPinFileError);
+      assert.strictEqual((err as CorruptPinFileError).path, file);
+      assert.ok((err as CorruptPinFileError).cause);
+    }
+  });
+
+  test("atomic write: no .tmp file remains after a successful set", async () => {
+    await registry.set("fs", "read", "h1");
+    await registry.set("fs", "write", "h2");
+    const stragglers = fs
+      .readdirSync(tmpDir)
+      .filter((f) => f.endsWith(".tmp"));
+    assert.deepStrictEqual(stragglers, []);
   });
 });
 
