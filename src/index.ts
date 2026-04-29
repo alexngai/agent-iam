@@ -89,6 +89,8 @@ export {
   formatDecision,
   issueMCPCredential,
   verifyMCPCredential,
+  requireApprovalIf,
+  denyIf,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -102,6 +104,7 @@ export type {
   MCPCredential,
   VerifyMCPCredentialOptions,
   VerifiedMCPCredential,
+  AnnotationHint,
 } from "./mcp/index.js";
 
 // Persistent identity

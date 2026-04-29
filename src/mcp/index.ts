@@ -35,3 +35,6 @@ export type {
   VerifyMCPCredentialOptions,
   VerifiedMCPCredential,
 } from "./credential.js";
+
+export { requireApprovalIf, denyIf } from "./annotations.js";
+export type { AnnotationHint } from "./annotations.js";
