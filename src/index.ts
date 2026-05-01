@@ -101,6 +101,9 @@ export {
   FileAuditSink,
   MemoryAuditSink,
   NullAuditSink,
+  getOrCreateMCPSigningKey,
+  publicKeyToJwk,
+  publicKeyToJwks,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -125,6 +128,7 @@ export type {
   MCPAuditEvent,
   MCPAuditSink,
   BuildDecisionEventArgs,
+  MCPSigningKey,
 } from "./mcp/index.js";
 
 // Persistent identity

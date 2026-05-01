@@ -507,4 +507,109 @@ describe("Broker", () => {
       assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:net:*"]);
     });
   });
+
+  describe("MCP signing key + issueForMCPServer (G5/G8)", () => {
+    let tempDir3: string;
+    let broker3: Broker;
+
+    beforeEach(() => {
+      tempDir3 = createTempDir();
+      broker3 = new Broker(tempDir3);
+    });
+
+    afterEach(() => {
+      cleanupTempDir(tempDir3);
+    });
+
+    test("getMCPSigningKey generates a keypair on first use", () => {
+      const key = broker3.getMCPSigningKey();
+      assert.match(key.privateKey, /-----BEGIN PRIVATE KEY-----/);
+      assert.match(key.publicKey, /-----BEGIN PUBLIC KEY-----/);
+    });
+
+    test("getMCPSigningKey is stable across calls (no rotation)", () => {
+      const a = broker3.getMCPSigningKey();
+      const b = broker3.getMCPSigningKey();
+      assert.strictEqual(a.privateKey, b.privateKey);
+      assert.strictEqual(a.publicKey, b.publicKey);
+    });
+
+    test("private key file is created with mode 0o600", () => {
+      broker3.getMCPSigningKey();
+      const keyPath = path.join(tempDir3, "mcp-signing.key");
+      const mode = fs.statSync(keyPath).mode & 0o777;
+      assert.strictEqual(mode, 0o600);
+    });
+
+    test("issueForMCPServer issues a credential the public key verifies", async () => {
+      const root = broker3.createRootToken({
+        agentId: "agent-1",
+        scopes: ["mcp:filesystem:read_file"],
+      });
+
+      const cred = await broker3.issueForMCPServer({
+        agentToken: root,
+        serverURI: "https://fs.example.com",
+        scopes: ["mcp:filesystem:read_file"],
+        ttlSeconds: 60,
+      });
+
+      const { verifyMCPCredential } = await import("./mcp/index.js");
+      const v = await verifyMCPCredential(cred.jwt, {
+        publicKey: broker3.getMCPSigningKey().publicKey,
+        expectedAudience: "https://fs.example.com",
+      });
+      assert.strictEqual(v.valid, true);
+      if (v.valid) {
+        assert.strictEqual(v.agentId, "agent-1");
+        assert.deepStrictEqual(v.scopes, ["mcp:filesystem:read_file"]);
+      }
+    });
+
+    test("issueForMCPServer rejects scopes not on the agent token", async () => {
+      const root = broker3.createRootToken({
+        agentId: "agent-1",
+        scopes: ["mcp:filesystem:read_file"],
+      });
+
+      await assert.rejects(
+        () =>
+          broker3.issueForMCPServer({
+            agentToken: root,
+            serverURI: "https://fs.example.com",
+            scopes: ["mcp:filesystem:write_file"],
+          }),
+        /not granted by the agent token/
+      );
+    });
+
+    test("issueForMCPServer records mcp.credential.issued audit event", async () => {
+      const { MemoryAuditSink } = await import("./mcp/index.js");
+      const sink = new MemoryAuditSink();
+      const root = broker3.createRootToken({
+        agentId: "agent-1",
+        scopes: ["mcp:fs:read"],
+      });
+      await broker3.issueForMCPServer({
+        agentToken: root,
+        serverURI: "https://fs",
+        scopes: ["mcp:fs:read"],
+        auditSink: sink,
+      });
+      assert.strictEqual(sink.events.length, 1);
+      assert.strictEqual(sink.events[0].kind, "mcp.credential.issued");
+      assert.strictEqual(sink.events[0].agentId, "agent-1");
+      assert.strictEqual(sink.events[0].audience, "https://fs");
+    });
+
+    test("publicKeyToJwks returns a JWK with kid + EdDSA alg", async () => {
+      const { publicKeyToJwks } = await import("./mcp/index.js");
+      const { publicKey } = broker3.getMCPSigningKey();
+      const jwks = await publicKeyToJwks(publicKey);
+      assert.strictEqual(jwks.keys.length, 1);
+      assert.strictEqual(jwks.keys[0].alg, "EdDSA");
+      assert.strictEqual(jwks.keys[0].use, "sig");
+      assert.match(jwks.keys[0].kid, /^[0-9a-f]{16}$/);
+    });
+  });
 });

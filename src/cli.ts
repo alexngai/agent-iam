@@ -505,6 +505,7 @@ import {
   checkMCPCall,
   formatDecision,
   FileSchemaPinRegistry,
+  publicKeyToJwks,
 } from "./mcp/index.js";
 
 const mcpCmd = program.command("mcp").description("MCP access-control utilities");
@@ -565,6 +566,41 @@ denyCmd
     if (removed) console.log(`removed: ${pattern}`);
     else {
       console.error(`not found: ${pattern}`);
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command("jwks")
+  .description("Print the broker's MCP signing public key as a JWKS document")
+  .action(async () => {
+    const broker = new Broker();
+    const { publicKey } = broker.getMCPSigningKey();
+    const jwks = await publicKeyToJwks(publicKey);
+    console.log(JSON.stringify(jwks, null, 2));
+  });
+
+mcpCmd
+  .command("issue-cred <serverURI>")
+  .description("Issue an RFC 8707 audience-bound credential for an MCP server")
+  .requiredOption("--token <token>", "Serialized agent token")
+  .requiredOption("--scopes <scope...>", "Scopes to grant on the credential")
+  .option("--ttl <seconds>", "Credential TTL in seconds (default 300)", "300")
+  .option("--issuer <issuer>", "Override the issuer claim (default: agent-iam)")
+  .action(async (serverURI: string, options) => {
+    const broker = new Broker();
+    try {
+      const token = broker.deserializeToken(options.token);
+      const cred = await broker.issueForMCPServer({
+        agentToken: token,
+        serverURI,
+        scopes: options.scopes,
+        ttlSeconds: parseInt(options.ttl, 10),
+        issuer: options.issuer,
+      });
+      console.log(cred.jwt);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });

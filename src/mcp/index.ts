@@ -66,3 +66,10 @@ export type {
   MCPAuditSink,
   BuildDecisionEventArgs,
 } from "./audit.js";
+
+export {
+  getOrCreateMCPSigningKey,
+  publicKeyToJwk,
+  publicKeyToJwks,
+} from "./signing-key.js";
+export type { MCPSigningKey } from "./signing-key.js";

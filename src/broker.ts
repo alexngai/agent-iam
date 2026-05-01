@@ -2,6 +2,12 @@
  * Core Broker class that ties together token management and credential issuance
  */
 
+import {
+  issueMCPCredential,
+  type MCPCredential,
+  type MCPAuditSink,
+} from "./mcp/index.js";
+import { getOrCreateMCPSigningKey, type MCPSigningKey } from "./mcp/signing-key.js";
 import type {
   AgentToken,
   CreateRootTokenParams,
@@ -601,6 +607,61 @@ export class Broker {
    */
   getMCPDenyPolicy(): string[] {
     return this.configService.loadConfig().mcpDenyPolicy ?? [];
+  }
+
+  /**
+   * Lazily load (or generate on first use) this broker's Ed25519 MCP
+   * signing keypair from `{configDir}/mcp-signing.{key,pub}`. Used to
+   * sign RFC 8707 audience-bound credentials.
+   */
+  getMCPSigningKey(): MCPSigningKey {
+    return getOrCreateMCPSigningKey(this.configService.getConfigDir());
+  }
+
+  /**
+   * Issue an RFC 8707 audience-bound credential for an MCP server. Wraps
+   * `issueMCPCredential` with this broker's signing key and a default
+   * issuer of the broker's `agentId` (caller can override via the
+   * `issuer` option).
+   *
+   * Validates that every requested scope is granted by the agent token
+   * (defense in depth). When an audit sink is provided, records a
+   * `mcp.credential.issued` event.
+   */
+  async issueForMCPServer(req: {
+    agentToken: AgentToken;
+    serverURI: string;
+    scopes: string[];
+    issuer?: string;
+    ttlSeconds?: number;
+    act?: string[];
+    auditSink?: MCPAuditSink;
+  }): Promise<MCPCredential> {
+    const { privateKey } = this.getMCPSigningKey();
+    const issuer = req.issuer ?? "agent-iam";
+    const cred = await issueMCPCredential({
+      agentToken: req.agentToken,
+      serverURI: req.serverURI,
+      scopes: req.scopes,
+      signingKey: privateKey,
+      issuer,
+      ttlSeconds: req.ttlSeconds,
+      act: req.act,
+    });
+    if (req.auditSink) {
+      await req.auditSink.record({
+        timestamp: new Date().toISOString(),
+        kind: "mcp.credential.issued",
+        agentId: req.agentToken.agentId,
+        audience: req.serverURI,
+        context: {
+          scopes: req.scopes,
+          expiresAt: cred.expiresAt,
+          issuer,
+        },
+      });
+    }
+    return cred;
   }
 
   /**
