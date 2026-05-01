@@ -170,6 +170,10 @@ Evaluation order:
 
 1. **Broker-level deny policy** (`options.brokerDenyPolicy`) wins over
    everything. The SCP analog — org admin says "no shell tools, period."
+   In persistent / distributed deployments, fetch this from
+   `Broker.getMCPDenyPolicy()` rather than hard-coding it; the broker
+   handles persistence in `config.json` and (in distributed mode)
+   leader → follower propagation on every sync.
 2. **Token allow list.** First matching scope grants.
 3. **Default deny.**
 
@@ -281,7 +285,6 @@ file swap that invalidates outstanding credentials.
   via `agent-iam mcp jwks` (mounted manually wherever).
 - **MCP audit-event emission for `verifyMCPCredential` / `verifyServerIdentity`.**
   Those are pure functions; harness can hand-emit equivalent events.
-- **Distributed-mode propagation of `mcpDenyPolicy`.** Single broker only.
 
 ---
 

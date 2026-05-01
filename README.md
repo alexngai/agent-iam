@@ -10,7 +10,8 @@ A capability-based credential broker for AI agents. Manages what agents can do t
 - **Self-Certifying Verification**: Remote services can verify agent identity without broker access
 - **Authority Endorsements**: Trusted parties can vouch for agent identities (X.509/VC-like)
 - **Provider Adapters**: GitHub, Google OAuth, AWS STS, Slack, and generic API keys
-- **Distributed Mode**: Leader/follower sync for multi-region deployments
+- **MCP Tool Access Control**: Allow/deny scopes, tool-schema TOFU pinning (rug-pull defense), RFC 8707 audience-bound credentials, server-identity verification, structured audit pipeline, and a shared HTTP pin registry for ephemeral agents. See [docs/mcp-policy.md](docs/mcp-policy.md) for the integrator contract.
+- **Distributed Mode**: Leader/follower sync for multi-region deployments (signing keys, provider configs, MCP deny policy, revocations)
 - **Token Refresh**: Background refresh for long-running agents
 - **CLI & Library**: Use programmatically or via command line
 
@@ -212,6 +213,97 @@ agent-iam identity revoke key:a1b2c3...
 | **Behavioral** | Service tracks interactions | "This agent has been reliable over 100 requests" |
 | **Authority-endorsed** | Authority signature on public key | "A trusted party vouches for this agent" |
 
+### 5. MCP Tool Access Control
+
+Agent-iam ships a defense-in-depth toolkit for agents that connect to MCP
+servers. The agent harness — the trusted code around an LLM that
+dispatches tool calls — owns enforcement; agent-iam distributes signed
+policy and pure-function helpers.
+
+```typescript
+import {
+  Broker,
+  checkMCPCall,
+  verifyToolSchema,
+  requireApprovalIf,
+  denyIf,
+  formatDecision,
+  FileSchemaPinRegistry,
+  FileAuditSink,
+  buildDecisionEvent,
+} from "agent-iam";
+
+const broker = new Broker();
+const pinRegistry = new FileSchemaPinRegistry();
+const auditSink = new FileAuditSink("/var/log/agent-iam/audit.jsonl");
+
+async function dispatchToolCall(token, server, toolDef, args) {
+  // 1. Schema TOFU — detects tool rug-pulls (CVE-2025-54136 class).
+  const pin = await verifyToolSchema(server, toolDef, pinRegistry);
+  if (!pin.valid) return askUser(`Schema for ${server}/${toolDef.name} changed`);
+
+  // 2. Allow/deny scope policy with org-wide deny override.
+  let decision = checkMCPCall(token, server, toolDef.name, args, {
+    brokerDenyPolicy: broker.getMCPDenyPolicy(),
+  });
+
+  // 3. Annotation-aware escalation (only for trusted servers).
+  decision = requireApprovalIf(decision, toolDef.annotations, "destructiveHint");
+  decision = denyIf(decision, toolDef.annotations, "openWorldHint");
+
+  // 4. Structured audit log.
+  await auditSink.record(buildDecisionEvent({
+    agentId: token.agentId, server, tool: toolDef.name, decision,
+  }));
+
+  if (decision.kind === "deny") throw new PermissionError(decision.reason);
+  if (decision.kind === "ask")  await promptHuman(decision.reason);
+  return invokeTool(server, toolDef.name, args);
+}
+```
+
+#### RFC 8707 audience-bound credentials
+
+When an MCP server uses OAuth-style auth, the broker signs a per-server
+JWT bound to the server's canonical URI. Tokens cannot be replayed across
+servers — the MCP authorization spec **MUSTs** this.
+
+```typescript
+const cred = await broker.issueForMCPServer({
+  agentToken: token,
+  serverURI: "https://filesystem.example.com",
+  scopes: ["mcp:filesystem:read_file"],
+  ttlSeconds: 300,
+});
+// Pass cred.jwt to the MCP server's Authorization header.
+```
+
+The broker manages its own EdDSA keypair under
+`~/.agent-credentials/mcp-signing.{key,pub}`. Distribute the public key as
+JWKS:
+
+```bash
+agent-iam mcp jwks > /srv/www/.well-known/jwks.json
+```
+
+#### Org-wide deny policy
+
+Persisted in broker config; propagates leader → follower automatically in
+distributed mode.
+
+```bash
+agent-iam mcp deny add 'mcp:shell:*'   # nobody runs shell tools, ever
+agent-iam mcp deny list
+```
+
+#### Reference harness
+
+A complete integration in ~80 lines lives at
+[examples/mcp-harness/](examples/mcp-harness/). The full integrator
+contract — including the HTTP pin-registry contract for shared
+deployments and the four call sites in dispatch order — is in
+[docs/mcp-policy.md](docs/mcp-policy.md).
+
 ## Scope Format
 
 Scopes follow `provider:resource:action` pattern:
@@ -277,6 +369,16 @@ agent-iam token show <token>
 
 # Credentials
 agent-iam cred github:repo:read myorg/myrepo --token <token>
+
+# MCP access control
+agent-iam mcp test --token <token> [--broker-deny <pat...>] <server> <tool>
+agent-iam mcp deny list
+agent-iam mcp deny add 'mcp:shell:*'
+agent-iam mcp deny remove 'mcp:shell:*'
+agent-iam mcp pin-list [--server <name>]
+agent-iam mcp pin-clear <server> [tool]
+agent-iam mcp jwks                                         # publish broker pubkey
+agent-iam mcp issue-cred <serverURI> --token <T> --scopes <S...> [--ttl <s>] [--issuer <iss>]
 
 # Status
 agent-iam status
