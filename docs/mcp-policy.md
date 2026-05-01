@@ -146,9 +146,22 @@ DELETE /pins/:server/:tool         → 200 | 404 (idempotent)
 ```
 
 `server` and `tool` path components are URL-encoded by the client.
-Authentication is a bearer token sent in `Authorization`. Network
-failures and non-2xx responses (other than `get`'s 404) propagate as
-exceptions — the TOFU model assumes registry availability.
+Authentication is a bearer token sent in `Authorization`. The client
+sets `redirect: "error"` to refuse 3xx responses (defense against a
+compromised registry redirecting bearer tokens to an attacker URL).
+Body parsing is bounded by the same timeout as the request.
+
+**409 Conflict on PUT** indicates that a different hash is already pinned
+for the same `(server, tool)` pair. The client surfaces this as a typed
+`PinConflictError` (carrying `server`, `tool`, and the response body)
+so callers can distinguish "concurrent first-pin race" from "actual
+schema drift" without parsing error strings. Server implementations
+should return 409 only on hash conflict; idempotent re-pin of the same
+hash should return 200.
+
+Network failures and non-2xx responses (other than `get`'s 404 and the
+PUT 409 above) propagate as generic thrown errors — the TOFU model
+assumes registry availability.
 
 ### 2. `checkMCPCall(token, server, tool, args?, options?)` — scope check
 
@@ -208,32 +221,50 @@ issues a per-server JWT with `aud = <canonical server URI>`. This
 prevents token replay across MCP servers — the MCP authorization spec
 **MUSTs** this.
 
-```ts
-import { issueMCPCredential, verifyMCPCredential } from "agent-iam";
+The broker manages its own EdDSA signing keypair and exposes it via
+`Broker.issueForMCPServer()` (recommended) or the lower-level pure
+`issueMCPCredential` for callers who hold the key themselves.
 
-// Broker side (or library wrapper):
-const cred = await issueMCPCredential({
+```ts
+import { Broker, MemoryAuditSink } from "agent-iam";
+
+const broker = new Broker();
+const auditSink = new MemoryAuditSink(); // or FileAuditSink, etc.
+
+// Broker side:
+const cred = await broker.issueForMCPServer({
   agentToken: token,
   serverURI: "https://filesystem.example.com",
   scopes: ["mcp:filesystem:read_file"],
-  signingKey: brokerSigningKeyPem,
-  issuer: "broker.example.com",
   ttlSeconds: 300,
+  auditSink,                                // optional: emits mcp.credential.issued
 });
 
 // Server side:
+import { verifyMCPCredential } from "agent-iam";
 const v = await verifyMCPCredential(cred.jwt, {
-  publicKey: brokerPublicKeyPem,
+  publicKey: brokerPublicKeyPem,            // see "Distributing the public key" below
   expectedAudience: "https://filesystem.example.com",
 });
 if (!v.valid) reject(v.error);
 ```
 
-The signing/verification keys are EdDSA (Ed25519), reusing the same
-keypair format as agent-iam's identity stack. Broker-side key management
-(generation, rotation, JWKS distribution) is not yet wired into the
-`Broker` class — for now `issueMCPCredential` is a pure function the
-caller invokes directly with the signing key.
+### Distributing the public key
+
+MCP servers verifying credentials need the broker's public key. agent-iam
+publishes it as a JWKS document (RFC 7517) via the CLI:
+
+```
+agent-iam mcp jwks
+```
+
+Mount that output at any URL (e.g. `https://broker.example.com/.well-known/jwks.json`)
+and have your MCP servers fetch it. The keypair lives at
+`{configDir}/mcp-signing.{key,pub}` (private mode 0o600), generated lazily
+on first use.
+
+Key rotation is not yet automated — replacing the keypair is a manual
+file swap that invalidates outstanding credentials.
 
 ---
 
@@ -245,7 +276,12 @@ caller invokes directly with the signing key.
 - **Cross-server combination policy** ("A or B in a session, not both").
 - **MCP proxy / out-of-process gate.** Out of scope for the broker.
 - **Async task / elicitation lifecycle.**
-- **`Broker.issueForMCPServer()` method.** Pure functions only in v1.
+- **Automated signing-key rotation** and JWKS endpoint served from the
+  leader server. Today rotation is a manual file swap and JWKS is served
+  via `agent-iam mcp jwks` (mounted manually wherever).
+- **MCP audit-event emission for `verifyMCPCredential` / `verifyServerIdentity`.**
+  Those are pure functions; harness can hand-emit equivalent events.
+- **Distributed-mode propagation of `mcpDenyPolicy`.** Single broker only.
 
 ---
 
@@ -266,18 +302,33 @@ the matched deny pattern; `ask` includes `reason`.
 
 ## CLI
 
-For local debugging:
-
 ```
+# Policy
 agent-iam mcp test --token <serialized> [--broker-deny <pattern>...] <server> <tool>
+agent-iam mcp deny list
+agent-iam mcp deny add <pattern>
+agent-iam mcp deny remove <pattern>
+
+# Schema pins
 agent-iam mcp pin-list [--server <name>]
 agent-iam mcp pin-clear <server> [tool]
+
+# Credentials & key distribution
+agent-iam mcp jwks
+agent-iam mcp issue-cred <serverURI> --token <T> --scopes <S...> [--ttl <secs>] [--issuer <iss>]
 ```
 
 `mcp test` exit codes encode the decision:
 - `0` — allow
 - `1` — deny
 - `2` — ask
+
+`mcp deny add` rejects patterns that aren't `*` or `mcp:*` shapes.
+`mcp issue-cred` writes an `mcp.credential.issued` audit event to
+`{configDir}/mcp-audit.jsonl` so operator-mints leave a trail. The
+command is intended for debugging, not production-scale issuance — for
+that, call `Broker.issueForMCPServer()` programmatically and supply
+your own audit sink.
 
 ---
 

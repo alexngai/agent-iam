@@ -39,7 +39,7 @@ For background on the existing system, see `docs/design.md` and
 | 3. RFC 8707 audience binding | `src/mcp/credential.ts` | 17 | `8f04e6e` |
 | 4. Annotation primitives | `src/mcp/annotations.ts` | 17 | `585eb41` |
 | 5. Server identity verification | `src/mcp/server-trust.ts`, `server-schema.ts` | 27 | `c145cae` |
-| 6. CLI + reference harness + docs | `src/cli.ts` (mcp commands), `examples/mcp-harness/`, `docs/mcp-policy.md` | (manual) | (this commit) |
+| 6. CLI + reference harness + docs | `src/cli.ts` (mcp commands), `examples/mcp-harness/`, `docs/mcp-policy.md` | (manual) | `52ca9eb` |
 
 **Deferred:** picomatch swap (no real bug class to fix); broker integration for
 `Broker.issueForMCPServer()` (pure functions ship; broker plumbing is follow-up
@@ -61,7 +61,7 @@ org running many agents, the items below need filling in.
 | G3 | **No structured audit pipeline** — `formatDecision` produces a string for local logs only. No event schema, no pluggable sink, no broker-side aggregation. Critical for incident response. | High | Closed (`9b62607`) |
 | G4 | **Hook-based integrations don't get the full `MCPTool`** — Claude Code's `PreToolUse` and similar pass tool name + args, not the definition. So TOFU and annotation primitives can't run from a hook context. Library or harness must re-fetch the tool def. | Medium | Open |
 | G5 | **No JWKS endpoint / broker public key distribution** — `verifyMCPCredential` works in principle but the receiving server has no built-in way to fetch the broker's public key. Currently bring-your-own-distribution. | High | Closed (`af608b8`) — CLI-served JWKS; HTTP endpoint via LeaderServer deferred |
-| G6 | **No shared TOFU registry for ephemeral / containerized agents** — `FileSchemaPinRegistry` writes to disk (lost on container restart); `MemorySchemaPinRegistry` loses state every run. Many ephemeral agents need a shared registry to detect rug-pulls reliably. | High | Closed (client) (`(this commit)`) — `HttpSchemaPinRegistry` ships against a documented HTTP contract; agent-iam doesn't ship the server (operator chooses Postgres/Redis/S3/etc.) |
+| G6 | **No shared TOFU registry for ephemeral / containerized agents** — `FileSchemaPinRegistry` writes to disk (lost on container restart); `MemorySchemaPinRegistry` loses state every run. Many ephemeral agents need a shared registry to detect rug-pulls reliably. | High | Closed (client) (`4387d05`) — `HttpSchemaPinRegistry` ships against a documented HTTP contract; agent-iam doesn't ship the server (operator chooses Postgres/Redis/S3/etc.) |
 | G7 | **No async-approval contract for `ask` decisions** — the `Decision.kind === "ask"` branch returns a reason; the harness has to invent its own queue/UI. No standard `AsyncApprovalProvider` interface. | Medium | Open |
 | G8 | **No `Broker.issueForMCPServer()` integration** — `issueMCPCredential` is a pure function callers wire themselves. Means key management, audit, and CLI ergonomics are caller-side. | Medium | Closed (`af608b8`) |
 
