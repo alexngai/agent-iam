@@ -46,6 +46,7 @@ export class LeaderServer {
   private signingKeyManager: SigningKeyManager;
   private revocationList: RevocationList;
   private providerConfigsVersion: number = 1;
+  private mcpDenyPolicyVersion: number = 1;
   private followers: Map<string, FollowerInfo> = new Map();
   private wsClients: Map<string, WebSocketClient> = new Map();
 
@@ -55,6 +56,9 @@ export class LeaderServer {
     this.configDir = configDir;
     this.signingKeyManager = new SigningKeyManager(configDir);
     this.revocationList = new RevocationList(configDir);
+    // When operators mutate the deny policy on the leader, bump the
+    // version so the next sync ships the change to followers.
+    this.broker.onMCPDenyPolicyChanged = () => this.bumpMCPDenyPolicyVersion();
   }
 
   /**
@@ -267,6 +271,7 @@ export class LeaderServer {
     const response: SyncResponse = {
       signingKeyVersion: this.signingKeyManager.getCurrentVersion(),
       providerConfigsVersion: this.providerConfigsVersion,
+      mcpDenyPolicyVersion: this.mcpDenyPolicyVersion,
       revocationListDelta: this.revocationList.getRevocationsSince(
         syncRequest.revocationListVersion
       ),
@@ -285,8 +290,24 @@ export class LeaderServer {
       response.providerConfigs = this.broker.showConfig().providers as Record<string, unknown>;
     }
 
+    // Include MCP deny policy if changed (or if follower never sent a version,
+    // which is the case on first sync after upgrading from a pre-G1 follower).
+    const followerMcpVersion = syncRequest.mcpDenyPolicyVersion ?? 0;
+    if (followerMcpVersion < this.mcpDenyPolicyVersion) {
+      response.mcpDenyPolicy = this.broker.getMCPDenyPolicy();
+    }
+
     res.statusCode = 200;
     res.end(JSON.stringify(response));
+  }
+
+  /**
+   * Bump the MCP deny policy version. Call after addMCPDenyPattern or
+   * removeMCPDenyPattern on the leader's broker so the next sync picks
+   * up the change.
+   */
+  bumpMCPDenyPolicyVersion(): void {
+    this.mcpDenyPolicyVersion++;
   }
 
   /**

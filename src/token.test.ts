@@ -62,6 +62,34 @@ describe("scopeMatches", () => {
     assert.strictEqual(scopeMatches("github:repo:read", ""), false);
     assert.strictEqual(scopeMatches("", "github:repo:read"), false);
   });
+
+  // Regression tests for mid-wildcard short-circuit (review finding C1)
+  test("mid-wildcard requires later segments to match", () => {
+    // Pre-fix bug: scopeMatches("mcp:*:read_file", "mcp:fs:write_file") returned true.
+    assert.strictEqual(scopeMatches("mcp:*:read_file", "mcp:fs:read_file"), true);
+    assert.strictEqual(scopeMatches("mcp:*:read_file", "mcp:fs:write_file"), false);
+    assert.strictEqual(scopeMatches("mcp:*:read_file", "mcp:fs:read_dir"), false);
+  });
+
+  test("mid-wildcard enforces segment count", () => {
+    // Pre-fix bug: scopeMatches("mcp:*:read", "mcp") returned true.
+    assert.strictEqual(scopeMatches("mcp:*:read", "mcp"), false);
+    assert.strictEqual(scopeMatches("mcp:*:read", "mcp:fs"), false);
+    assert.strictEqual(scopeMatches("mcp:*:read", "mcp:fs:read:nested"), false);
+  });
+
+  test("single-segment wildcard does not match across segments", () => {
+    // `provider:*:action` is a 3-segment shape; * spans exactly one segment.
+    assert.strictEqual(scopeMatches("a:*:c", "a:b:c"), true);
+    assert.strictEqual(scopeMatches("a:*:c", "a:b:d:c"), false);
+    assert.strictEqual(scopeMatches("a:*:c", "a:c"), false);
+  });
+
+  test("multiple internal wildcards", () => {
+    assert.strictEqual(scopeMatches("a:*:*:d", "a:b:c:d"), true);
+    assert.strictEqual(scopeMatches("a:*:*:d", "a:b:c:e"), false);
+    assert.strictEqual(scopeMatches("a:*:*:d", "a:b:d"), false);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────

@@ -435,6 +435,51 @@ describe("Leader/Follower Integration", () => {
     const afterVersion = follower.getSigningKeyManager().getCurrentVersion();
     assert.ok(afterVersion > beforeVersion);
   });
+
+  test("MCP deny policy propagates leader → follower (G1 distributed)", async () => {
+    await follower.start();
+    // Initial state: empty on both sides.
+    assert.deepStrictEqual(followerBroker.getMCPDenyPolicy(), []);
+
+    // Operator adds a pattern on the leader.
+    leaderBroker.addMCPDenyPattern("mcp:shell:*");
+
+    // Force a sync; follower should now see the pattern.
+    await follower.sync();
+    assert.deepStrictEqual(followerBroker.getMCPDenyPolicy(), ["mcp:shell:*"]);
+
+    // Add a second pattern on the leader.
+    leaderBroker.addMCPDenyPattern("mcp:net:*");
+    await follower.sync();
+    assert.deepStrictEqual(followerBroker.getMCPDenyPolicy(), [
+      "mcp:shell:*",
+      "mcp:net:*",
+    ]);
+
+    // Remove a pattern; follower drops it (replace-not-merge semantics).
+    leaderBroker.removeMCPDenyPattern("mcp:shell:*");
+    await follower.sync();
+    assert.deepStrictEqual(followerBroker.getMCPDenyPolicy(), ["mcp:net:*"]);
+  });
+
+  test("MCP deny policy not re-shipped when version unchanged", async () => {
+    leaderBroker.addMCPDenyPattern("mcp:shell:*");
+    await follower.start();
+
+    // First sync delivers the policy.
+    assert.deepStrictEqual(followerBroker.getMCPDenyPolicy(), ["mcp:shell:*"]);
+
+    // Mutate follower's policy directly to detect a re-application.
+    followerBroker.setMCPDenyPolicy(["sentinel"]);
+    // Note: setMCPDenyPolicy bumps the follower's local version too, but
+    // the *follower-state-machine* version (FollowerClient internal)
+    // tracks what the leader sent. Force a sync without leader changes.
+    await follower.sync();
+
+    // The follower's local override survives because the leader version
+    // didn't bump — no policy field in the response.
+    assert.deepStrictEqual(followerBroker.getMCPDenyPolicy(), ["sentinel"]);
+  });
 });
 
 describe("Follower State Machine", () => {

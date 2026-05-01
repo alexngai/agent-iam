@@ -44,16 +44,18 @@ export function scopeMatches(pattern: string, scope: string): boolean {
     return scope.startsWith(prefix);
   }
 
-  // Handle partial wildcards: "github:*" matches "github:repo:read"
+  // Handle partial wildcards: "github:*:read" matches "github:repo:read".
+  // `*` is a single-segment wildcard; segment count must match.
   const patternParts = pattern.split(":");
   const scopeParts = scope.split(":");
+  if (patternParts.length !== scopeParts.length) return false;
 
   for (let i = 0; i < patternParts.length; i++) {
-    if (patternParts[i] === "*") return true;
+    if (patternParts[i] === "*") continue;
     if (patternParts[i] !== scopeParts[i]) return false;
   }
 
-  return patternParts.length === scopeParts.length;
+  return true;
 }
 
 /** Check if a resource matches a constraint pattern (glob-style) */

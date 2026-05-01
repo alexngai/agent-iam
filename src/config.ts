@@ -65,14 +65,17 @@ export class ConfigService {
     return JSON.parse(content) as BrokerConfig;
   }
 
-  /** Save config file */
+  /** Save config file (atomic: write tmp + rename). */
   saveConfig(config: BrokerConfig): void {
     this.ensureConfigDir();
-    fs.writeFileSync(
-      this.configPath,
-      JSON.stringify(config, null, 2),
-      { mode: 0o600 }
-    );
+    // Atomic write to defend against crash-mid-write corruption. POSIX
+    // rename within the same filesystem is atomic. Doesn't address
+    // multi-process write races (those still need a file lock); this only
+    // ensures any one writer either fully succeeds or leaves the prior
+    // file intact.
+    const tmp = `${this.configPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, this.configPath);
   }
 
   /** Get provider configuration */

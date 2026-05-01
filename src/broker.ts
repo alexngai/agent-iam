@@ -2,6 +2,12 @@
  * Core Broker class that ties together token management and credential issuance
  */
 
+import {
+  issueMCPCredential,
+  type MCPCredential,
+  type MCPAuditSink,
+} from "./mcp/index.js";
+import { getOrCreateMCPSigningKey, type MCPSigningKey } from "./mcp/signing-key.js";
 import type {
   AgentToken,
   CreateRootTokenParams,
@@ -592,6 +598,128 @@ export class Broker {
   getConfigDir(): string {
     return this.configService.getConfigDir();
   }
+
+  /**
+   * Get the org-wide MCP deny policy. Returns the patterns stored in
+   * `config.json` under `mcpDenyPolicy`, or an empty array if unset.
+   * The harness should pass this to `checkMCPCall` via
+   * `CheckMCPCallOptions.brokerDenyPolicy`.
+   */
+  getMCPDenyPolicy(): string[] {
+    return this.configService.loadConfig().mcpDenyPolicy ?? [];
+  }
+
+  /**
+   * Lazily load (or generate on first use) this broker's Ed25519 MCP
+   * signing keypair from `{configDir}/mcp-signing.{key,pub}`. Used to
+   * sign RFC 8707 audience-bound credentials.
+   */
+  getMCPSigningKey(): MCPSigningKey {
+    return getOrCreateMCPSigningKey(this.configService.getConfigDir());
+  }
+
+  /**
+   * Issue an RFC 8707 audience-bound credential for an MCP server. Wraps
+   * `issueMCPCredential` with this broker's signing key and a default
+   * issuer of the broker's `agentId` (caller can override via the
+   * `issuer` option).
+   *
+   * Validates that every requested scope is granted by the agent token
+   * (defense in depth). When an audit sink is provided, records a
+   * `mcp.credential.issued` event.
+   */
+  async issueForMCPServer(req: {
+    agentToken: AgentToken;
+    serverURI: string;
+    scopes: string[];
+    issuer?: string;
+    ttlSeconds?: number;
+    act?: string[];
+    auditSink?: MCPAuditSink;
+  }): Promise<MCPCredential> {
+    const { privateKey } = this.getMCPSigningKey();
+    const issuer = req.issuer ?? "agent-iam";
+    const cred = await issueMCPCredential({
+      agentToken: req.agentToken,
+      serverURI: req.serverURI,
+      scopes: req.scopes,
+      signingKey: privateKey,
+      issuer,
+      ttlSeconds: req.ttlSeconds,
+      act: req.act,
+    });
+    if (req.auditSink) {
+      await req.auditSink.record({
+        timestamp: new Date().toISOString(),
+        kind: "mcp.credential.issued",
+        agentId: req.agentToken.agentId,
+        audience: req.serverURI,
+        context: {
+          scopes: req.scopes,
+          expiresAt: cred.expiresAt,
+          issuer,
+        },
+      });
+    }
+    return cred;
+  }
+
+  /**
+   * Add a pattern to the org-wide MCP deny policy. Idempotent — adding an
+   * already-present pattern is a no-op. Patterns must either be `*` (deny
+   * everything) or start with `mcp:` (the namespace this policy controls).
+   * Non-MCP patterns are nonsense here and rejected loudly to avoid
+   * silent dead config.
+   */
+  addMCPDenyPattern(pattern: string): void {
+    if (!pattern) throw new Error("addMCPDenyPattern: pattern must be non-empty");
+    if (pattern !== "*" && !pattern.startsWith("mcp:")) {
+      throw new Error(
+        `addMCPDenyPattern: pattern '${pattern}' must be '*' or start with 'mcp:' ` +
+          `(this policy only controls the mcp scope namespace)`
+      );
+    }
+    const config = this.configService.loadConfig();
+    const current = config.mcpDenyPolicy ?? [];
+    if (current.includes(pattern)) return;
+    config.mcpDenyPolicy = [...current, pattern];
+    this.configService.saveConfig(config);
+    this.onMCPDenyPolicyChanged?.();
+  }
+
+  /**
+   * Remove a pattern from the org-wide MCP deny policy. Returns whether
+   * the pattern was present.
+   */
+  removeMCPDenyPattern(pattern: string): boolean {
+    const config = this.configService.loadConfig();
+    const current = config.mcpDenyPolicy ?? [];
+    const idx = current.indexOf(pattern);
+    if (idx === -1) return false;
+    config.mcpDenyPolicy = current.filter((p) => p !== pattern);
+    this.configService.saveConfig(config);
+    this.onMCPDenyPolicyChanged?.();
+    return true;
+  }
+
+  /**
+   * Replace the entire MCP deny policy. Used by FollowerClient to apply
+   * a leader-pushed policy snapshot. Operators editing the policy by hand
+   * should prefer addMCPDenyPattern / removeMCPDenyPattern.
+   */
+  setMCPDenyPolicy(patterns: string[]): void {
+    const config = this.configService.loadConfig();
+    config.mcpDenyPolicy = [...patterns];
+    this.configService.saveConfig(config);
+    this.onMCPDenyPolicyChanged?.();
+  }
+
+  /**
+   * Optional hook fired whenever the MCP deny policy is mutated through
+   * any of add/remove/set. The LeaderServer wires this to bump its
+   * version counter so the next sync ships the change to followers.
+   */
+  onMCPDenyPolicyChanged?: () => void;
 
   // ─────────────────────────────────────────────────────────────────
   // CACHE MANAGEMENT

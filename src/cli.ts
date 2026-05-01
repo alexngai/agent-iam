@@ -498,6 +498,156 @@ program
   });
 
 // ─────────────────────────────────────────────────────────────────
+// MCP COMMANDS
+// ─────────────────────────────────────────────────────────────────
+
+import * as path from "path";
+import {
+  checkMCPCall,
+  formatDecision,
+  FileSchemaPinRegistry,
+  FileAuditSink,
+  publicKeyToJwks,
+} from "./mcp/index.js";
+
+const mcpCmd = program.command("mcp").description("MCP access-control utilities");
+
+mcpCmd
+  .command("test <server> <tool>")
+  .description("Dry-run a checkMCPCall against a token (logs decision, no side effects)")
+  .requiredOption("--token <token>", "Serialized agent token")
+  .option("--broker-deny <pattern...>", "Override broker deny policy for this run")
+  .action((server: string, tool: string, options) => {
+    const broker = new Broker();
+    try {
+      const token = broker.deserializeToken(options.token);
+      const brokerDenyPolicy = options.brokerDeny ?? broker.getMCPDenyPolicy();
+      const decision = checkMCPCall(token, server, tool, undefined, {
+        brokerDenyPolicy,
+      });
+      console.log(formatDecision(decision));
+      process.exit(decision.kind === "allow" ? 0 : decision.kind === "ask" ? 2 : 1);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+const denyCmd = mcpCmd
+  .command("deny")
+  .description("Manage the org-wide MCP deny policy stored in broker config");
+
+denyCmd
+  .command("list")
+  .description("Show all MCP deny patterns")
+  .action(() => {
+    const broker = new Broker();
+    const patterns = broker.getMCPDenyPolicy();
+    if (patterns.length === 0) {
+      console.log("(no patterns)");
+      return;
+    }
+    for (const p of patterns) console.log(p);
+  });
+
+denyCmd
+  .command("add <pattern>")
+  .description("Add a pattern to the MCP deny policy")
+  .action((pattern: string) => {
+    const broker = new Broker();
+    broker.addMCPDenyPattern(pattern);
+    console.log(`added: ${pattern}`);
+  });
+
+denyCmd
+  .command("remove <pattern>")
+  .description("Remove a pattern from the MCP deny policy")
+  .action((pattern: string) => {
+    const broker = new Broker();
+    const removed = broker.removeMCPDenyPattern(pattern);
+    if (removed) console.log(`removed: ${pattern}`);
+    else {
+      console.error(`not found: ${pattern}`);
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command("jwks")
+  .description("Print the broker's MCP signing public key as a JWKS document")
+  .action(async () => {
+    const broker = new Broker();
+    const { publicKey } = broker.getMCPSigningKey();
+    const jwks = await publicKeyToJwks(publicKey);
+    console.log(JSON.stringify(jwks, null, 2));
+  });
+
+mcpCmd
+  .command("issue-cred <serverURI>")
+  .description(
+    "Issue an RFC 8707 audience-bound credential for an MCP server. " +
+    "Mints are logged to mcp-audit.jsonl in the broker config dir."
+  )
+  .requiredOption("--token <token>", "Serialized agent token")
+  .requiredOption("--scopes <scope...>", "Scopes to grant on the credential")
+  .option("--ttl <seconds>", "Credential TTL in seconds (default 300)", "300")
+  .option("--issuer <issuer>", "Override the issuer claim (default: agent-iam)")
+  .action(async (serverURI: string, options) => {
+    const broker = new Broker();
+    try {
+      const token = broker.deserializeToken(options.token);
+      // CLI mints leave an audit trail by default — the operator-mints-
+      // credentials path should not be silent.
+      const auditPath = path.join(broker.getConfigDir(), "mcp-audit.jsonl");
+      const auditSink = new FileAuditSink(auditPath);
+      const cred = await broker.issueForMCPServer({
+        agentToken: token,
+        serverURI,
+        scopes: options.scopes,
+        ttlSeconds: parseInt(options.ttl, 10),
+        issuer: options.issuer,
+        auditSink,
+      });
+      console.log(cred.jwt);
+      console.error(`(audit: ${auditPath})`);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command("pin-list")
+  .description("List all MCP tool-schema pins on this broker")
+  .option("--server <name>", "Filter to a specific server")
+  .action(async (options) => {
+    const registry = new FileSchemaPinRegistry();
+    const entries = await registry.list(options.server);
+    if (entries.length === 0) {
+      console.log("(no pins)");
+      return;
+    }
+    for (const e of entries) {
+      console.log(`${e.server}\t${e.tool}\t${e.pin.hash}\t${e.pin.pinnedAt}`);
+    }
+  });
+
+mcpCmd
+  .command("pin-clear <server> [tool]")
+  .description("Remove an MCP tool-schema pin (next call re-pins via TOFU)")
+  .action(async (server: string, tool: string | undefined) => {
+    const registry = new FileSchemaPinRegistry();
+    if (tool) {
+      await registry.delete(server, tool);
+      console.log(`cleared pin for ${server}/${tool}`);
+    } else {
+      const entries = await registry.list(server);
+      for (const e of entries) await registry.delete(e.server, e.tool);
+      console.log(`cleared ${entries.length} pin(s) for ${server}`);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
 // DISTRIBUTED MODE COMMANDS
 // ─────────────────────────────────────────────────────────────────
 

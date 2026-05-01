@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/**/*.test.js",
+    "test": "node --test dist/*.test.js dist/**/*.test.js",
     "cli": "node dist/cli.js",
     "prepublishOnly": "npm run build",
     "version:patch": "npm version patch && git push && git push --tags",
@@ -28,7 +28,9 @@
   "dependencies": {
     "@octokit/auth-app": "^7.1.1",
     "@octokit/rest": "^21.0.2",
-    "commander": "^12.1.0"
+    "ajv": "^8.20.0",
+    "commander": "^12.1.0",
+    "jose": "^6.2.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -32,6 +32,7 @@ export class FollowerClient {
   private signingKeyManager: SigningKeyManager;
   private revocationList: RevocationList;
   private providerConfigsVersion: number = 0;
+  private mcpDenyPolicyVersion: number = 0;
 
   private state: FollowerState = FollowerState.STARTING;
   private lastSyncAt: Date | null = null;
@@ -105,6 +106,7 @@ export class FollowerClient {
       followerId: this.config.followerId,
       signingKeyVersion: this.signingKeyManager.getCurrentVersion(),
       providerConfigsVersion: this.providerConfigsVersion,
+      mcpDenyPolicyVersion: this.mcpDenyPolicyVersion,
       revocationListVersion: this.revocationList.getVersion(),
     };
 
@@ -164,6 +166,13 @@ export class FollowerClient {
       // Provider configs are handled through broker's config service
       // This would need integration with the broker's config
       this.providerConfigsVersion = response.providerConfigsVersion;
+    }
+
+    // Update MCP deny policy if provided. Replaces (not merges) so that
+    // a leader-side `removeMCPDenyPattern` actually removes from followers.
+    if (response.mcpDenyPolicy !== undefined) {
+      this.broker.setMCPDenyPolicy(response.mcpDenyPolicy);
+      this.mcpDenyPolicyVersion = response.mcpDenyPolicyVersion ?? 0;
     }
   }
 

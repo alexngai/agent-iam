@@ -445,4 +445,228 @@ describe("Broker", () => {
       assert.strictEqual(receivedChild.currentDepth, 1);
     });
   });
+
+  describe("MCP deny policy (G1)", () => {
+    let tempDir2: string;
+    let broker2: Broker;
+
+    beforeEach(() => {
+      tempDir2 = createTempDir();
+      broker2 = new Broker(tempDir2);
+    });
+
+    afterEach(() => {
+      cleanupTempDir(tempDir2);
+    });
+
+    test("getMCPDenyPolicy returns empty array when unset", () => {
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), []);
+    });
+
+    test("addMCPDenyPattern persists to config", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:shell:*"]);
+
+      // New broker on the same dir sees the change.
+      const broker3 = new Broker(tempDir2);
+      assert.deepStrictEqual(broker3.getMCPDenyPolicy(), ["mcp:shell:*"]);
+    });
+
+    test("addMCPDenyPattern is idempotent", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:shell:*"]);
+    });
+
+    test("addMCPDenyPattern preserves existing patterns", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      broker2.addMCPDenyPattern("mcp:net:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:shell:*", "mcp:net:*"]);
+    });
+
+    test("addMCPDenyPattern rejects empty pattern", () => {
+      assert.throws(() => broker2.addMCPDenyPattern(""), /must be non-empty/);
+    });
+
+    test("removeMCPDenyPattern returns true and removes when present", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      const removed = broker2.removeMCPDenyPattern("mcp:shell:*");
+      assert.strictEqual(removed, true);
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), []);
+    });
+
+    test("removeMCPDenyPattern returns false when absent", () => {
+      const removed = broker2.removeMCPDenyPattern("mcp:shell:*");
+      assert.strictEqual(removed, false);
+    });
+
+    test("removeMCPDenyPattern preserves other patterns", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      broker2.addMCPDenyPattern("mcp:net:*");
+      broker2.removeMCPDenyPattern("mcp:shell:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:net:*"]);
+    });
+
+    test("addMCPDenyPattern rejects patterns that don't control mcp:* (review)", () => {
+      assert.throws(
+        () => broker2.addMCPDenyPattern("github:repo:read"),
+        /must be '\*' or start with 'mcp:'/
+      );
+      assert.throws(() => broker2.addMCPDenyPattern("shell"), /'mcp:'/);
+    });
+
+    test("addMCPDenyPattern accepts the universal wildcard", () => {
+      broker2.addMCPDenyPattern("*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["*"]);
+    });
+  });
+
+  describe("MCP signing key + issueForMCPServer (G5/G8)", () => {
+    let tempDir3: string;
+    let broker3: Broker;
+
+    beforeEach(() => {
+      tempDir3 = createTempDir();
+      broker3 = new Broker(tempDir3);
+    });
+
+    afterEach(() => {
+      cleanupTempDir(tempDir3);
+    });
+
+    test("getMCPSigningKey generates a keypair on first use", () => {
+      const key = broker3.getMCPSigningKey();
+      assert.match(key.privateKey, /-----BEGIN PRIVATE KEY-----/);
+      assert.match(key.publicKey, /-----BEGIN PUBLIC KEY-----/);
+    });
+
+    test("getMCPSigningKey is stable across calls (no rotation)", () => {
+      const a = broker3.getMCPSigningKey();
+      const b = broker3.getMCPSigningKey();
+      assert.strictEqual(a.privateKey, b.privateKey);
+      assert.strictEqual(a.publicKey, b.publicKey);
+    });
+
+    test("private key file is created with mode 0o600", () => {
+      broker3.getMCPSigningKey();
+      const keyPath = path.join(tempDir3, "mcp-signing.key");
+      const mode = fs.statSync(keyPath).mode & 0o777;
+      assert.strictEqual(mode, 0o600);
+    });
+
+    test("a fresh broker on the same dir loads (does not regenerate) the key", () => {
+      const a = broker3.getMCPSigningKey();
+      const fresh = new Broker(tempDir3);
+      const b = fresh.getMCPSigningKey();
+      assert.strictEqual(a.privateKey, b.privateKey);
+      assert.strictEqual(a.publicKey, b.publicKey);
+    });
+
+    test("regeneration replaces a hostile-pre-existing private key with mode 0o600 (review)", () => {
+      // Pre-fix bug: writeFileSync(..., { mode }) only applies the mode at
+      // *creation*. A hostile pre-creation at 0o644 would survive regen.
+      const keyPath = path.join(tempDir3, "mcp-signing.key");
+      const pubPath = path.join(tempDir3, "mcp-signing.pub");
+
+      // Force regeneration: write a sentinel private key and delete the pub.
+      // (We don't put real PEM here — the regen path nukes & rewrites it.)
+      fs.writeFileSync(keyPath, "stale", { mode: 0o644 });
+      // Ensure pre-existing mode is the wrong one even if writeFileSync
+      // ignored it (some FS umasks do).
+      fs.chmodSync(keyPath, 0o644);
+      // Force the load-cache to miss by removing the public counterpart.
+      if (fs.existsSync(pubPath)) fs.unlinkSync(pubPath);
+
+      const fresh = new Broker(tempDir3);
+      fresh.getMCPSigningKey();
+
+      const mode = fs.statSync(keyPath).mode & 0o777;
+      assert.strictEqual(mode, 0o600);
+      // And the content is real PEM, not "stale".
+      assert.match(fs.readFileSync(keyPath, "utf8"), /-----BEGIN PRIVATE KEY-----/);
+    });
+
+    test("issueForMCPServer issues a credential the public key verifies", async () => {
+      const root = broker3.createRootToken({
+        agentId: "agent-1",
+        scopes: ["mcp:filesystem:read_file"],
+      });
+
+      const cred = await broker3.issueForMCPServer({
+        agentToken: root,
+        serverURI: "https://fs.example.com",
+        scopes: ["mcp:filesystem:read_file"],
+        ttlSeconds: 60,
+      });
+
+      const { verifyMCPCredential } = await import("./mcp/index.js");
+      const v = await verifyMCPCredential(cred.jwt, {
+        publicKey: broker3.getMCPSigningKey().publicKey,
+        expectedAudience: "https://fs.example.com",
+      });
+      assert.strictEqual(v.valid, true);
+      if (v.valid) {
+        assert.strictEqual(v.agentId, "agent-1");
+        assert.deepStrictEqual(v.scopes, ["mcp:filesystem:read_file"]);
+      }
+    });
+
+    test("issueForMCPServer rejects scopes not on the agent token", async () => {
+      const root = broker3.createRootToken({
+        agentId: "agent-1",
+        scopes: ["mcp:filesystem:read_file"],
+      });
+
+      await assert.rejects(
+        () =>
+          broker3.issueForMCPServer({
+            agentToken: root,
+            serverURI: "https://fs.example.com",
+            scopes: ["mcp:filesystem:write_file"],
+          }),
+        /not granted by the agent token/
+      );
+    });
+
+    test("issueForMCPServer records mcp.credential.issued audit event", async () => {
+      const { MemoryAuditSink } = await import("./mcp/index.js");
+      const sink = new MemoryAuditSink();
+      const root = broker3.createRootToken({
+        agentId: "agent-1",
+        scopes: ["mcp:fs:read"],
+      });
+      await broker3.issueForMCPServer({
+        agentToken: root,
+        serverURI: "https://fs",
+        scopes: ["mcp:fs:read"],
+        auditSink: sink,
+      });
+      assert.strictEqual(sink.events.length, 1);
+      assert.strictEqual(sink.events[0].kind, "mcp.credential.issued");
+      assert.strictEqual(sink.events[0].agentId, "agent-1");
+      assert.strictEqual(sink.events[0].audience, "https://fs");
+    });
+
+    test("publicKeyToJwks returns a JWK with kid + EdDSA alg", async () => {
+      const { publicKeyToJwks } = await import("./mcp/index.js");
+      const { publicKey } = broker3.getMCPSigningKey();
+      const jwks = await publicKeyToJwks(publicKey);
+      assert.strictEqual(jwks.keys.length, 1);
+      assert.strictEqual(jwks.keys[0].alg, "EdDSA");
+      assert.strictEqual(jwks.keys[0].use, "sig");
+      // RFC 7638 JWK thumbprint: base64url-encoded SHA-256 of canonical
+      // JWK members. 32 bytes → 43 chars without padding.
+      assert.match(jwks.keys[0].kid, /^[A-Za-z0-9_-]{43}$/);
+    });
+
+    test("kid is stable across PEM whitespace re-encoding (RFC 7638 thumbprint)", async () => {
+      const { publicKeyToJwks } = await import("./mcp/index.js");
+      const { publicKey } = broker3.getMCPSigningKey();
+      const lf = publicKey.replace(/\r\n/g, "\n");
+      const crlf = publicKey.replace(/\r?\n/g, "\r\n");
+      const a = await publicKeyToJwks(lf);
+      const b = await publicKeyToJwks(crlf);
+      assert.strictEqual(a.keys[0].kid, b.keys[0].kid);
+    });
+  });
 });
