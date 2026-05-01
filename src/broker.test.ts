@@ -506,6 +506,19 @@ describe("Broker", () => {
       broker2.removeMCPDenyPattern("mcp:shell:*");
       assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:net:*"]);
     });
+
+    test("addMCPDenyPattern rejects patterns that don't control mcp:* (review)", () => {
+      assert.throws(
+        () => broker2.addMCPDenyPattern("github:repo:read"),
+        /must be '\*' or start with 'mcp:'/
+      );
+      assert.throws(() => broker2.addMCPDenyPattern("shell"), /'mcp:'/);
+    });
+
+    test("addMCPDenyPattern accepts the universal wildcard", () => {
+      broker2.addMCPDenyPattern("*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["*"]);
+    });
   });
 
   describe("MCP signing key + issueForMCPServer (G5/G8)", () => {
@@ -539,6 +552,38 @@ describe("Broker", () => {
       const keyPath = path.join(tempDir3, "mcp-signing.key");
       const mode = fs.statSync(keyPath).mode & 0o777;
       assert.strictEqual(mode, 0o600);
+    });
+
+    test("a fresh broker on the same dir loads (does not regenerate) the key", () => {
+      const a = broker3.getMCPSigningKey();
+      const fresh = new Broker(tempDir3);
+      const b = fresh.getMCPSigningKey();
+      assert.strictEqual(a.privateKey, b.privateKey);
+      assert.strictEqual(a.publicKey, b.publicKey);
+    });
+
+    test("regeneration replaces a hostile-pre-existing private key with mode 0o600 (review)", () => {
+      // Pre-fix bug: writeFileSync(..., { mode }) only applies the mode at
+      // *creation*. A hostile pre-creation at 0o644 would survive regen.
+      const keyPath = path.join(tempDir3, "mcp-signing.key");
+      const pubPath = path.join(tempDir3, "mcp-signing.pub");
+
+      // Force regeneration: write a sentinel private key and delete the pub.
+      // (We don't put real PEM here — the regen path nukes & rewrites it.)
+      fs.writeFileSync(keyPath, "stale", { mode: 0o644 });
+      // Ensure pre-existing mode is the wrong one even if writeFileSync
+      // ignored it (some FS umasks do).
+      fs.chmodSync(keyPath, 0o644);
+      // Force the load-cache to miss by removing the public counterpart.
+      if (fs.existsSync(pubPath)) fs.unlinkSync(pubPath);
+
+      const fresh = new Broker(tempDir3);
+      fresh.getMCPSigningKey();
+
+      const mode = fs.statSync(keyPath).mode & 0o777;
+      assert.strictEqual(mode, 0o600);
+      // And the content is real PEM, not "stale".
+      assert.match(fs.readFileSync(keyPath, "utf8"), /-----BEGIN PRIVATE KEY-----/);
     });
 
     test("issueForMCPServer issues a credential the public key verifies", async () => {

@@ -501,10 +501,12 @@ program
 // MCP COMMANDS
 // ─────────────────────────────────────────────────────────────────
 
+import * as path from "path";
 import {
   checkMCPCall,
   formatDecision,
   FileSchemaPinRegistry,
+  FileAuditSink,
   publicKeyToJwks,
 } from "./mcp/index.js";
 
@@ -582,7 +584,10 @@ mcpCmd
 
 mcpCmd
   .command("issue-cred <serverURI>")
-  .description("Issue an RFC 8707 audience-bound credential for an MCP server")
+  .description(
+    "Issue an RFC 8707 audience-bound credential for an MCP server. " +
+    "Mints are logged to mcp-audit.jsonl in the broker config dir."
+  )
   .requiredOption("--token <token>", "Serialized agent token")
   .requiredOption("--scopes <scope...>", "Scopes to grant on the credential")
   .option("--ttl <seconds>", "Credential TTL in seconds (default 300)", "300")
@@ -591,14 +596,20 @@ mcpCmd
     const broker = new Broker();
     try {
       const token = broker.deserializeToken(options.token);
+      // CLI mints leave an audit trail by default — the operator-mints-
+      // credentials path should not be silent.
+      const auditPath = path.join(broker.getConfigDir(), "mcp-audit.jsonl");
+      const auditSink = new FileAuditSink(auditPath);
       const cred = await broker.issueForMCPServer({
         agentToken: token,
         serverURI,
         scopes: options.scopes,
         ttlSeconds: parseInt(options.ttl, 10),
         issuer: options.issuer,
+        auditSink,
       });
       console.log(cred.jwt);
+      console.error(`(audit: ${auditPath})`);
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

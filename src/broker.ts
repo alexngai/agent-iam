@@ -666,10 +666,19 @@ export class Broker {
 
   /**
    * Add a pattern to the org-wide MCP deny policy. Idempotent — adding an
-   * already-present pattern is a no-op.
+   * already-present pattern is a no-op. Patterns must either be `*` (deny
+   * everything) or start with `mcp:` (the namespace this policy controls).
+   * Non-MCP patterns are nonsense here and rejected loudly to avoid
+   * silent dead config.
    */
   addMCPDenyPattern(pattern: string): void {
     if (!pattern) throw new Error("addMCPDenyPattern: pattern must be non-empty");
+    if (pattern !== "*" && !pattern.startsWith("mcp:")) {
+      throw new Error(
+        `addMCPDenyPattern: pattern '${pattern}' must be '*' or start with 'mcp:' ` +
+          `(this policy only controls the mcp scope namespace)`
+      );
+    }
     const config = this.configService.loadConfig();
     const current = config.mcpDenyPolicy ?? [];
     if (current.includes(pattern)) return;

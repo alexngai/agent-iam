@@ -53,7 +53,16 @@ export function getOrCreateMCPSigningKey(configDir: string): MCPSigningKey {
     publicKeyEncoding: { type: "spki", format: "pem" },
   });
 
+  // Unlink any pre-existing files first: `fs.writeFileSync(..., { mode })`
+  // only applies the mode at *creation* time. Writing into a pre-existing
+  // file with mode 0o644 leaves the previous mode intact, which would let
+  // a hostile pre-creation force a 0o600 keypair to land at 0o644.
+  if (fs.existsSync(privPath)) fs.unlinkSync(privPath);
+  if (fs.existsSync(pubPath)) fs.unlinkSync(pubPath);
+
   fs.writeFileSync(privPath, privateKey as string, { mode: 0o600 });
+  // Belt-and-braces: explicit chmod in case the FS umask altered the mode.
+  fs.chmodSync(privPath, 0o600);
   fs.writeFileSync(pubPath, publicKey as string);
 
   return {

@@ -30,6 +30,25 @@
 
 import type { PinnedTool, SchemaPinRegistry } from "./schema-pin.js";
 
+/**
+ * Thrown by `HttpSchemaPinRegistry.set` when the registry server returns
+ * `409 Conflict` — typically meaning a different hash is already pinned for
+ * the same (server, tool) pair. Carries the server response body for
+ * inspection.
+ */
+export class PinConflictError extends Error {
+  constructor(
+    public readonly server: string,
+    public readonly tool: string,
+    public readonly response: string
+  ) {
+    super(
+      `Pin conflict on ${server}/${tool}: server rejected with 409${response ? ` — ${response.slice(0, 200)}` : ""}`
+    );
+    this.name = "PinConflictError";
+  }
+}
+
 /** Options for constructing an HttpSchemaPinRegistry. */
 export interface HttpSchemaPinRegistryOptions {
   /** Base URL of the registry server (no trailing slash needed). */
@@ -74,28 +93,52 @@ export class HttpSchemaPinRegistry implements SchemaPinRegistry {
 
   async get(server: string, tool: string): Promise<PinnedTool | undefined> {
     const url = `${this.baseURL}/pins/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`;
-    const res = await this.request(url, { method: "GET" });
-    if (res.status === 404) return undefined;
-    await this.requireOk(res, "get");
-    const body = (await res.json()) as PinResponse;
-    return { hash: body.hash, pinnedAt: body.pinnedAt };
+    return this.withTimeout(async (signal) => {
+      const res = await this.fetchImpl(url, this.requestInit("GET", undefined, undefined, signal));
+      if (res.status === 404) return undefined;
+      await this.requireOk(res, "get");
+      const body = (await res.json()) as PinResponse;
+      if (typeof body?.hash !== "string" || typeof body?.pinnedAt !== "string") {
+        throw new Error(
+          `HttpSchemaPinRegistry.get: malformed response body (missing hash/pinnedAt)`
+        );
+      }
+      return { hash: body.hash, pinnedAt: body.pinnedAt };
+    });
   }
 
   async set(server: string, tool: string, hash: string): Promise<void> {
     const url = `${this.baseURL}/pins/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`;
-    const res = await this.request(url, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ hash }),
+    return this.withTimeout(async (signal) => {
+      const res = await this.fetchImpl(
+        url,
+        this.requestInit(
+          "PUT",
+          { "Content-Type": "application/json" },
+          JSON.stringify({ hash }),
+          signal
+        )
+      );
+      if (res.status === 409) {
+        let detail = "";
+        try {
+          detail = await res.text();
+        } catch {
+          /* ignore */
+        }
+        throw new PinConflictError(server, tool, detail);
+      }
+      await this.requireOk(res, "set");
     });
-    await this.requireOk(res, "set");
   }
 
   async delete(server: string, tool: string): Promise<void> {
     const url = `${this.baseURL}/pins/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`;
-    const res = await this.request(url, { method: "DELETE" });
-    if (res.status === 404) return; // idempotent
-    await this.requireOk(res, "delete");
+    return this.withTimeout(async (signal) => {
+      const res = await this.fetchImpl(url, this.requestInit("DELETE", undefined, undefined, signal));
+      if (res.status === 404) return; // idempotent
+      await this.requireOk(res, "delete");
+    });
   }
 
   async list(
@@ -104,27 +147,68 @@ export class HttpSchemaPinRegistry implements SchemaPinRegistry {
     const url = server
       ? `${this.baseURL}/pins?server=${encodeURIComponent(server)}`
       : `${this.baseURL}/pins`;
-    const res = await this.request(url, { method: "GET" });
-    await this.requireOk(res, "list");
-    const body = (await res.json()) as ListItemResponse[];
-    return body.map((e) => ({
-      server: e.server,
-      tool: e.tool,
-      pin: { hash: e.hash, pinnedAt: e.pinnedAt },
-    }));
+    return this.withTimeout(async (signal) => {
+      const res = await this.fetchImpl(url, this.requestInit("GET", undefined, undefined, signal));
+      await this.requireOk(res, "list");
+      const body = (await res.json()) as ListItemResponse[];
+      if (!Array.isArray(body)) {
+        throw new Error(`HttpSchemaPinRegistry.list: malformed response body (not an array)`);
+      }
+      return body.map((e) => {
+        if (
+          typeof e?.server !== "string" ||
+          typeof e?.tool !== "string" ||
+          typeof e?.hash !== "string" ||
+          typeof e?.pinnedAt !== "string"
+        ) {
+          throw new Error(
+            `HttpSchemaPinRegistry.list: malformed response item (expected server/tool/hash/pinnedAt strings)`
+          );
+        }
+        return {
+          server: e.server,
+          tool: e.tool,
+          pin: { hash: e.hash, pinnedAt: e.pinnedAt },
+        };
+      });
+    });
   }
 
-  private async request(url: string, init: RequestInit): Promise<Response> {
-    const headers: Record<string, string> = {
-      ...(init.headers as Record<string, string> | undefined),
-    };
+  /** Compose RequestInit with auth header and explicit redirect policy. */
+  private requestInit(
+    method: string,
+    headers: Record<string, string> | undefined,
+    body: string | undefined,
+    signal: AbortSignal
+  ): RequestInit {
+    const finalHeaders: Record<string, string> = { ...(headers ?? {}) };
     if (this.authToken) {
-      headers["Authorization"] = `Bearer ${this.authToken}`;
+      finalHeaders["Authorization"] = `Bearer ${this.authToken}`;
     }
+    return {
+      method,
+      headers: finalHeaders,
+      body,
+      signal,
+      // Refuse to follow redirects: a compromised pin server returning 302
+      // would otherwise re-send the bearer token to an attacker URL.
+      // Caller surfaces this as a "Redirect not allowed" fetch error.
+      redirect: "error",
+    };
+  }
+
+  /**
+   * Run an async operation under a single AbortController whose timeout
+   * covers the entire request *plus* body parsing. The previous design
+   * cleared the timer when fetch() resolved with headers, leaving body
+   * reads unbounded — a server can drip-feed JSON forever to keep an
+   * agent stalled.
+   */
+  private async withTimeout<T>(op: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     try {
-      return await this.fetchImpl(url, { ...init, headers, signal: ctrl.signal });
+      return await op(ctrl.signal);
     } finally {
       clearTimeout(timer);
     }

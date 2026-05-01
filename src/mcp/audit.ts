@@ -27,15 +27,18 @@ import type { Decision } from "./policy.js";
 export interface MCPAuditEvent {
   /** Event timestamp (ISO 8601). */
   timestamp: string;
-  /** Event kind — extensible, but these are the v1 categories. */
+  /**
+   * Event kind. Only the kinds with active emitters in this library are
+   * declared; harnesses extending the audit pipeline can pass arbitrary
+   * additional strings here at runtime via type-coercion if they want to
+   * record their own kinds.
+   */
   kind:
     | "mcp.tool.decision"
     | "mcp.schema.pin"
     | "mcp.schema.drift"
     | "mcp.schema.repin"
-    | "mcp.credential.issued"
-    | "mcp.credential.verified"
-    | "mcp.server.identity-verified";
+    | "mcp.credential.issued";
   /** Agent the event is about, when applicable. */
   agentId?: string;
   /** MCP server identifier, when applicable. */
@@ -147,9 +150,11 @@ export class FileAuditSink implements MCPAuditSink {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
-    if (!fs.existsSync(this.path)) {
-      fs.writeFileSync(this.path, "", { mode: 0o600 });
-    }
+    // Open with O_APPEND | O_CREAT (no O_TRUNC) so concurrent writers
+    // don't truncate each other's records. `writeFileSync(path, "")` would
+    // race with another process's appendFileSync and clobber events.
+    const fd = fs.openSync(this.path, "a", 0o600);
+    fs.closeSync(fd);
     this.initialized = true;
   }
 }

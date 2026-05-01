@@ -8,7 +8,7 @@
 
 import { test, describe, beforeEach } from "node:test";
 import * as assert from "node:assert";
-import { HttpSchemaPinRegistry } from "./http-pin-registry.js";
+import { HttpSchemaPinRegistry, PinConflictError } from "./http-pin-registry.js";
 
 /** Construct a fake fetch that backs onto an in-memory store. */
 function fakeFetch() {
@@ -165,8 +165,10 @@ describe("HttpSchemaPinRegistry", () => {
   });
 
   test("error message includes operation name and status", async () => {
+    // 5xx goes through the generic error path; 409 is now PinConflictError
+    // (covered by its own test below).
     const broken: typeof fetch = async () =>
-      new Response("conflict", { status: 409, statusText: "Conflict" });
+      new Response("server down", { status: 503, statusText: "Service Unavailable" });
     const r = new HttpSchemaPinRegistry({
       baseURL: "https://pins.example.com",
       fetchImpl: broken,
@@ -177,7 +179,7 @@ describe("HttpSchemaPinRegistry", () => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       assert.match(msg, /set/);
-      assert.match(msg, /409/);
+      assert.match(msg, /503/);
     }
   });
 
@@ -193,5 +195,90 @@ describe("HttpSchemaPinRegistry", () => {
       timeoutMs: 50,
     });
     await assert.rejects(() => r.get("fs", "read"), /aborted/);
+  });
+
+  test("timeout also covers body parsing (drip-feed defense, review)", async () => {
+    // Pre-fix: clearTimeout fired when fetch resolved with headers, leaving
+    // body reads unbounded. A server can stream-feed a JSON body for hours.
+    // We model that with a Response whose .json() rejects on signal abort.
+    const dripFeed: typeof fetch = (_input, init) => {
+      const signal = init?.signal as AbortSignal;
+      const fakeBody = new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("body aborted")));
+      });
+      const res = new Response(JSON.stringify({ hash: "x", pinnedAt: "y" }));
+      // Override .json() to honor the abort signal; default Response.json
+      // resolves immediately so we couldn't observe the bug.
+      (res as any).json = () => fakeBody;
+      return Promise.resolve(res);
+    };
+    const r = new HttpSchemaPinRegistry({
+      baseURL: "https://pins.example.com",
+      fetchImpl: dripFeed,
+      timeoutMs: 50,
+    });
+    await assert.rejects(() => r.get("fs", "read"), /body aborted/);
+  });
+
+  test("set throws PinConflictError on 409 (typed for callers)", async () => {
+    const conflict: typeof fetch = async () =>
+      new Response("hash already pinned", { status: 409, statusText: "Conflict" });
+    const r = new HttpSchemaPinRegistry({
+      baseURL: "https://pins.example.com",
+      fetchImpl: conflict,
+    });
+    try {
+      await r.set("fs", "read", "h");
+      assert.fail("expected throw");
+    } catch (err) {
+      assert.ok(err instanceof PinConflictError);
+      assert.strictEqual((err as PinConflictError).server, "fs");
+      assert.strictEqual((err as PinConflictError).tool, "read");
+      assert.match((err as PinConflictError).response, /already pinned/);
+    }
+  });
+
+  test("get throws on malformed body (missing hash)", async () => {
+    const malformed: typeof fetch = async () =>
+      new Response(JSON.stringify({ pinnedAt: "t" }), { status: 200 });
+    const r = new HttpSchemaPinRegistry({
+      baseURL: "https://pins.example.com",
+      fetchImpl: malformed,
+    });
+    await assert.rejects(() => r.get("fs", "read"), /malformed response body/);
+  });
+
+  test("list throws when body is not an array", async () => {
+    const malformed: typeof fetch = async () =>
+      new Response(JSON.stringify({ oops: "object" }), { status: 200 });
+    const r = new HttpSchemaPinRegistry({
+      baseURL: "https://pins.example.com",
+      fetchImpl: malformed,
+    });
+    await assert.rejects(() => r.list(), /not an array/);
+  });
+
+  test("list throws when items are missing fields", async () => {
+    const malformed: typeof fetch = async () =>
+      new Response(JSON.stringify([{ server: "fs", tool: "read" }]), { status: 200 });
+    const r = new HttpSchemaPinRegistry({
+      baseURL: "https://pins.example.com",
+      fetchImpl: malformed,
+    });
+    await assert.rejects(() => r.list(), /malformed response item/);
+  });
+
+  test("sets redirect: error on every request (no implicit redirect-follow)", async () => {
+    let observedRedirect: RequestRedirect | undefined;
+    const captureFetch: typeof fetch = async (_input, init) => {
+      observedRedirect = init?.redirect;
+      return new Response(JSON.stringify({ hash: "h", pinnedAt: "t" }), { status: 200 });
+    };
+    const r = new HttpSchemaPinRegistry({
+      baseURL: "https://pins.example.com",
+      fetchImpl: captureFetch,
+    });
+    await r.get("fs", "read");
+    assert.strictEqual(observedRedirect, "error");
   });
 });

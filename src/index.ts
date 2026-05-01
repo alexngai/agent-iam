@@ -105,6 +105,7 @@ export {
   publicKeyToJwk,
   publicKeyToJwks,
   HttpSchemaPinRegistry,
+  PinConflictError,
 } from "./mcp/index.js";
 export type {
   MCPTool,
