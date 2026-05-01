@@ -52,3 +52,17 @@ export type {
 
 export { validateServerManifest } from "./server-schema.js";
 export type { ServerManifest } from "./server-schema.js";
+
+export {
+  buildDecisionEvent,
+  ConsoleAuditSink,
+  CompositeAuditSink,
+  FileAuditSink,
+  MemoryAuditSink,
+  NullAuditSink,
+} from "./audit.js";
+export type {
+  MCPAuditEvent,
+  MCPAuditSink,
+  BuildDecisionEventArgs,
+} from "./audit.js";

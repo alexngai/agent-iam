@@ -18,10 +18,13 @@ import {
   requireApprovalIf,
   denyIf,
   formatDecision,
+  buildDecisionEvent,
+  NullAuditSink,
   type AgentToken,
   type MCPTool,
   type SchemaPinRegistry,
   type Decision,
+  type MCPAuditSink,
 } from "../../dist/index.js";
 
 export interface HarnessConfig {
@@ -40,8 +43,12 @@ export interface HarnessConfig {
   invokeTool: (server: string, tool: string, args: unknown) => Promise<unknown>;
   /** Stub for surfacing an `ask` decision to a human. Returns true if approved. */
   promptHuman: (reason: string) => Promise<boolean>;
-  /** Audit-log sink. */
+  /** Human-readable audit-log sink (one line per event). */
   log?: (line: string) => void;
+  /** Structured audit-event sink. Defaults to NullAuditSink. */
+  auditSink?: MCPAuditSink;
+  /** Optional agent ID stamped on audit events. */
+  agentId?: string;
 }
 
 export class PermissionError extends Error {
@@ -66,6 +73,7 @@ export async function dispatchToolCall(
   args: unknown
 ): Promise<unknown> {
   const log = cfg.log ?? (() => {});
+  const auditSink = cfg.auditSink ?? new NullAuditSink();
   const target = `${serverName}/${toolDef.name}`;
 
   // 1. Schema TOFU.
@@ -74,6 +82,15 @@ export async function dispatchToolCall(
   if (!pin.valid) {
     if (pin.drift) {
       log(`tool=${target} schema-drift known=${pin.drift.knownHash.slice(0, 8)} current=${pin.drift.currentHash.slice(0, 8)}`);
+      await auditSink.record({
+        timestamp: new Date().toISOString(),
+        kind: "mcp.schema.drift",
+        agentId: cfg.agentId,
+        server: serverName,
+        tool: toolDef.name,
+        priorHash: pin.drift.knownHash,
+        hash: pin.drift.currentHash,
+      });
       const approved = await cfg.promptHuman(
         `Tool ${target} schema has changed since first use. Continue?`
       );
@@ -87,6 +104,15 @@ export async function dispatchToolCall(
       // User-approved drift: re-pin to the new hash.
       await cfg.pinRegistry.set(serverName, toolDef.name, pin.drift.currentHash);
       log(`tool=${target} schema-repinned current=${pin.drift.currentHash.slice(0, 8)}`);
+      await auditSink.record({
+        timestamp: new Date().toISOString(),
+        kind: "mcp.schema.repin",
+        agentId: cfg.agentId,
+        server: serverName,
+        tool: toolDef.name,
+        priorHash: pin.drift.knownHash,
+        hash: pin.drift.currentHash,
+      });
     } else {
       // Strict mode (cfg.tofu === false) and the tool was never pinned.
       throw new SchemaDriftError(
@@ -95,6 +121,14 @@ export async function dispatchToolCall(
         ""
       );
     }
+  } else if (pin.firstContact) {
+    await auditSink.record({
+      timestamp: new Date().toISOString(),
+      kind: "mcp.schema.pin",
+      agentId: cfg.agentId,
+      server: serverName,
+      tool: toolDef.name,
+    });
   }
 
   // 2. Scope policy.
@@ -109,6 +143,14 @@ export async function dispatchToolCall(
   }
 
   log(`tool=${target} ${formatDecision(decision)}`);
+  await auditSink.record(
+    buildDecisionEvent({
+      agentId: cfg.agentId,
+      server: serverName,
+      tool: toolDef.name,
+      decision,
+    })
+  );
 
   switch (decision.kind) {
     case "deny":

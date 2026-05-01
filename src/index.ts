@@ -95,6 +95,12 @@ export {
   artifactSha256,
   validateServerManifest,
   CorruptPinFileError,
+  buildDecisionEvent,
+  ConsoleAuditSink,
+  CompositeAuditSink,
+  FileAuditSink,
+  MemoryAuditSink,
+  NullAuditSink,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -116,6 +122,9 @@ export type {
   ServerTrustCheckResult,
   ServerTrustVerification,
   ServerManifest,
+  MCPAuditEvent,
+  MCPAuditSink,
+  BuildDecisionEventArgs,
 } from "./mcp/index.js";
 
 // Persistent identity
