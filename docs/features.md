@@ -56,7 +56,7 @@ org running many agents, the items below need filling in.
 
 | # | Gap | Severity for ops | Status |
 |---|---|---|---|
-| G1 | **Broker-config storage for `mcpDenyPolicy`** — currently an `CheckMCPCallOptions` field the harness must plumb. No CLI to manage; no propagation through distributed mode. | High | Closed (`c2a5e75`) — single-broker complete; distributed-mode propagation deferred |
+| G1 | **Broker-config storage for `mcpDenyPolicy`** — currently an `CheckMCPCallOptions` field the harness must plumb. No CLI to manage; no propagation through distributed mode. | High | Closed (`c2a5e75` single-broker; distributed-mode propagation in this commit) |
 | G2 | **No fine-grained revocation** — only whole-token revocation exists. Can't withdraw a single MCP scope from a still-valid token. | Medium | Open |
 | G3 | **No structured audit pipeline** — `formatDecision` produces a string for local logs only. No event schema, no pluggable sink, no broker-side aggregation. Critical for incident response. | High | Closed (`9b62607`) |
 | G4 | **Hook-based integrations don't get the full `MCPTool`** — Claude Code's `PreToolUse` and similar pass tool name + args, not the definition. So TOFU and annotation primitives can't run from a hook context. Library or harness must re-fetch the tool def. | Medium | Open |

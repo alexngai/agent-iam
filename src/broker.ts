@@ -684,6 +684,7 @@ export class Broker {
     if (current.includes(pattern)) return;
     config.mcpDenyPolicy = [...current, pattern];
     this.configService.saveConfig(config);
+    this.onMCPDenyPolicyChanged?.();
   }
 
   /**
@@ -697,8 +698,28 @@ export class Broker {
     if (idx === -1) return false;
     config.mcpDenyPolicy = current.filter((p) => p !== pattern);
     this.configService.saveConfig(config);
+    this.onMCPDenyPolicyChanged?.();
     return true;
   }
+
+  /**
+   * Replace the entire MCP deny policy. Used by FollowerClient to apply
+   * a leader-pushed policy snapshot. Operators editing the policy by hand
+   * should prefer addMCPDenyPattern / removeMCPDenyPattern.
+   */
+  setMCPDenyPolicy(patterns: string[]): void {
+    const config = this.configService.loadConfig();
+    config.mcpDenyPolicy = [...patterns];
+    this.configService.saveConfig(config);
+    this.onMCPDenyPolicyChanged?.();
+  }
+
+  /**
+   * Optional hook fired whenever the MCP deny policy is mutated through
+   * any of add/remove/set. The LeaderServer wires this to bump its
+   * version counter so the next sync ships the change to followers.
+   */
+  onMCPDenyPolicyChanged?: () => void;
 
   // ─────────────────────────────────────────────────────────────────
   // CACHE MANAGEMENT

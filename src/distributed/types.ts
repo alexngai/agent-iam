@@ -38,6 +38,8 @@ export interface SyncRequest {
   providerConfigsVersion: number;
   /** Current revocation list version */
   revocationListVersion: number;
+  /** Current MCP deny policy version known to follower */
+  mcpDenyPolicyVersion?: number;
   /** List of known root token IDs (for delta sync) */
   knownRootTokens?: string[];
 }
@@ -52,6 +54,10 @@ export interface SyncResponse {
   providerConfigs?: Record<string, unknown>;
   /** Current provider configs version */
   providerConfigsVersion: number;
+  /** MCP deny policy patterns, only if changed */
+  mcpDenyPolicy?: string[];
+  /** Current MCP deny policy version */
+  mcpDenyPolicyVersion?: number;
   /** Delta of newly revoked token IDs since follower's version */
   revocationListDelta: string[];
   /** Current revocation list version */
