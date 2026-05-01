@@ -73,3 +73,6 @@ export {
   publicKeyToJwks,
 } from "./signing-key.js";
 export type { MCPSigningKey } from "./signing-key.js";
+
+export { HttpSchemaPinRegistry } from "./http-pin-registry.js";
+export type { HttpSchemaPinRegistryOptions } from "./http-pin-registry.js";

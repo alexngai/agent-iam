@@ -54,16 +54,16 @@ operations layer** has known gaps. As a security toolkit for a single trusted
 harness on a workstation, W1 is feature-complete. As a deployable system for an
 org running many agents, the items below need filling in.
 
-| # | Gap | Severity for ops |
-|---|---|---|
-| G1 | **Broker-config storage for `mcpDenyPolicy`** — currently an `CheckMCPCallOptions` field the harness must plumb. No CLI to manage; no propagation through distributed mode. | High |
-| G2 | **No fine-grained revocation** — only whole-token revocation exists. Can't withdraw a single MCP scope from a still-valid token. | Medium |
-| G3 | **No structured audit pipeline** — `formatDecision` produces a string for local logs only. No event schema, no pluggable sink, no broker-side aggregation. Critical for incident response. | High |
-| G4 | **Hook-based integrations don't get the full `MCPTool`** — Claude Code's `PreToolUse` and similar pass tool name + args, not the definition. So TOFU and annotation primitives can't run from a hook context. Library or harness must re-fetch the tool def. | Medium |
-| G5 | **No JWKS endpoint / broker public key distribution** — `verifyMCPCredential` works in principle but the receiving server has no built-in way to fetch the broker's public key. Currently bring-your-own-distribution. | High |
-| G6 | **No shared TOFU registry for ephemeral / containerized agents** — `FileSchemaPinRegistry` writes to disk (lost on container restart); `MemorySchemaPinRegistry` loses state every run. Many ephemeral agents need a shared registry to detect rug-pulls reliably. | High |
-| G7 | **No async-approval contract for `ask` decisions** — the `Decision.kind === "ask"` branch returns a reason; the harness has to invent its own queue/UI. No standard `AsyncApprovalProvider` interface. | Medium |
-| G8 | **No `Broker.issueForMCPServer()` integration** — `issueMCPCredential` is a pure function callers wire themselves. Means key management, audit, and CLI ergonomics are caller-side. | Medium |
+| # | Gap | Severity for ops | Status |
+|---|---|---|---|
+| G1 | **Broker-config storage for `mcpDenyPolicy`** — currently an `CheckMCPCallOptions` field the harness must plumb. No CLI to manage; no propagation through distributed mode. | High | Closed (`c2a5e75`) — single-broker complete; distributed-mode propagation deferred |
+| G2 | **No fine-grained revocation** — only whole-token revocation exists. Can't withdraw a single MCP scope from a still-valid token. | Medium | Open |
+| G3 | **No structured audit pipeline** — `formatDecision` produces a string for local logs only. No event schema, no pluggable sink, no broker-side aggregation. Critical for incident response. | High | Closed (`9b62607`) |
+| G4 | **Hook-based integrations don't get the full `MCPTool`** — Claude Code's `PreToolUse` and similar pass tool name + args, not the definition. So TOFU and annotation primitives can't run from a hook context. Library or harness must re-fetch the tool def. | Medium | Open |
+| G5 | **No JWKS endpoint / broker public key distribution** — `verifyMCPCredential` works in principle but the receiving server has no built-in way to fetch the broker's public key. Currently bring-your-own-distribution. | High | Closed (`af608b8`) — CLI-served JWKS; HTTP endpoint via LeaderServer deferred |
+| G6 | **No shared TOFU registry for ephemeral / containerized agents** — `FileSchemaPinRegistry` writes to disk (lost on container restart); `MemorySchemaPinRegistry` loses state every run. Many ephemeral agents need a shared registry to detect rug-pulls reliably. | High | Closed (client) (`(this commit)`) — `HttpSchemaPinRegistry` ships against a documented HTTP contract; agent-iam doesn't ship the server (operator chooses Postgres/Redis/S3/etc.) |
+| G7 | **No async-approval contract for `ask` decisions** — the `Decision.kind === "ask"` branch returns a reason; the harness has to invent its own queue/UI. No standard `AsyncApprovalProvider` interface. | Medium | Open |
+| G8 | **No `Broker.issueForMCPServer()` integration** — `issueMCPCredential` is a pure function callers wire themselves. Means key management, audit, and CLI ergonomics are caller-side. | Medium | Closed (`af608b8`) |
 
 Filling order (post-W1 follow-ups, in priority):
 

@@ -104,6 +104,7 @@ export {
   getOrCreateMCPSigningKey,
   publicKeyToJwk,
   publicKeyToJwks,
+  HttpSchemaPinRegistry,
 } from "./mcp/index.js";
 export type {
   MCPTool,
@@ -129,6 +130,7 @@ export type {
   MCPAuditSink,
   BuildDecisionEventArgs,
   MCPSigningKey,
+  HttpSchemaPinRegistryOptions,
 } from "./mcp/index.js";
 
 // Persistent identity

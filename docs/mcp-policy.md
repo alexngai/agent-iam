@@ -128,7 +128,27 @@ canonical SHA-256 of the tool definition; on subsequent contacts compares.
 
 Storage default: `~/.agent-credentials/mcp-pins/{encodeURIComponent(server)}.json`.
 Pass a different directory to `new FileSchemaPinRegistry(dir)` for tests.
-For ephemeral agents use `MemorySchemaPinRegistry`.
+For tests / ephemeral processes use `MemorySchemaPinRegistry`.
+
+For **multi-replica or containerized agents** that can't rely on a local
+file (a container restart loses the pin state, defeating rug-pull
+detection), use `HttpSchemaPinRegistry` against a registry server you
+operate. agent-iam ships the *client* but not the server — pin storage is
+a database concern (Postgres, Redis, S3, k8s ConfigMap, etc.) and
+operators have strong opinions. Implement the documented contract:
+
+```
+GET    /pins                       → 200 [{server,tool,hash,pinnedAt}, ...]
+GET    /pins?server=NAME           → 200 (filtered)
+GET    /pins/:server/:tool         → 200 {hash, pinnedAt} | 404
+PUT    /pins/:server/:tool         → 200 (body {hash}) | 409 conflict
+DELETE /pins/:server/:tool         → 200 | 404 (idempotent)
+```
+
+`server` and `tool` path components are URL-encoded by the client.
+Authentication is a bearer token sent in `Authorization`. Network
+failures and non-2xx responses (other than `get`'s 404) propagate as
+exceptions — the TOFU model assumes registry availability.
 
 ### 2. `checkMCPCall(token, server, tool, args?, options?)` — scope check
 
