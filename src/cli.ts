@@ -513,18 +513,58 @@ mcpCmd
   .command("test <server> <tool>")
   .description("Dry-run a checkMCPCall against a token (logs decision, no side effects)")
   .requiredOption("--token <token>", "Serialized agent token")
-  .option("--broker-deny <pattern...>", "Org-wide deny patterns to apply")
+  .option("--broker-deny <pattern...>", "Override broker deny policy for this run")
   .action((server: string, tool: string, options) => {
     const broker = new Broker();
     try {
       const token = broker.deserializeToken(options.token);
+      const brokerDenyPolicy = options.brokerDeny ?? broker.getMCPDenyPolicy();
       const decision = checkMCPCall(token, server, tool, undefined, {
-        brokerDenyPolicy: options.brokerDeny,
+        brokerDenyPolicy,
       });
       console.log(formatDecision(decision));
       process.exit(decision.kind === "allow" ? 0 : decision.kind === "ask" ? 2 : 1);
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+const denyCmd = mcpCmd
+  .command("deny")
+  .description("Manage the org-wide MCP deny policy stored in broker config");
+
+denyCmd
+  .command("list")
+  .description("Show all MCP deny patterns")
+  .action(() => {
+    const broker = new Broker();
+    const patterns = broker.getMCPDenyPolicy();
+    if (patterns.length === 0) {
+      console.log("(no patterns)");
+      return;
+    }
+    for (const p of patterns) console.log(p);
+  });
+
+denyCmd
+  .command("add <pattern>")
+  .description("Add a pattern to the MCP deny policy")
+  .action((pattern: string) => {
+    const broker = new Broker();
+    broker.addMCPDenyPattern(pattern);
+    console.log(`added: ${pattern}`);
+  });
+
+denyCmd
+  .command("remove <pattern>")
+  .description("Remove a pattern from the MCP deny policy")
+  .action((pattern: string) => {
+    const broker = new Broker();
+    const removed = broker.removeMCPDenyPattern(pattern);
+    if (removed) console.log(`removed: ${pattern}`);
+    else {
+      console.error(`not found: ${pattern}`);
       process.exit(1);
     }
   });

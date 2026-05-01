@@ -501,6 +501,12 @@ export interface ProvidersConfig {
 /** Broker configuration stored in config.json */
 export interface BrokerConfig {
   providers: ProvidersConfig;
+  /**
+   * Org-wide deny patterns applied to every checkMCPCall evaluation. The
+   * SCP analog: cannot be widened by any token. See `docs/mcp-policy.md`
+   * for scope syntax. Optional — if absent, no broker-level deny.
+   */
+  mcpDenyPolicy?: string[];
 }
 
 /** Serialized token for passing between processes */

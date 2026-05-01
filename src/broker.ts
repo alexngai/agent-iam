@@ -593,6 +593,43 @@ export class Broker {
     return this.configService.getConfigDir();
   }
 
+  /**
+   * Get the org-wide MCP deny policy. Returns the patterns stored in
+   * `config.json` under `mcpDenyPolicy`, or an empty array if unset.
+   * The harness should pass this to `checkMCPCall` via
+   * `CheckMCPCallOptions.brokerDenyPolicy`.
+   */
+  getMCPDenyPolicy(): string[] {
+    return this.configService.loadConfig().mcpDenyPolicy ?? [];
+  }
+
+  /**
+   * Add a pattern to the org-wide MCP deny policy. Idempotent — adding an
+   * already-present pattern is a no-op.
+   */
+  addMCPDenyPattern(pattern: string): void {
+    if (!pattern) throw new Error("addMCPDenyPattern: pattern must be non-empty");
+    const config = this.configService.loadConfig();
+    const current = config.mcpDenyPolicy ?? [];
+    if (current.includes(pattern)) return;
+    config.mcpDenyPolicy = [...current, pattern];
+    this.configService.saveConfig(config);
+  }
+
+  /**
+   * Remove a pattern from the org-wide MCP deny policy. Returns whether
+   * the pattern was present.
+   */
+  removeMCPDenyPattern(pattern: string): boolean {
+    const config = this.configService.loadConfig();
+    const current = config.mcpDenyPolicy ?? [];
+    const idx = current.indexOf(pattern);
+    if (idx === -1) return false;
+    config.mcpDenyPolicy = current.filter((p) => p !== pattern);
+    this.configService.saveConfig(config);
+    return true;
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // CACHE MANAGEMENT
   // ─────────────────────────────────────────────────────────────────

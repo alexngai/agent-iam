@@ -445,4 +445,66 @@ describe("Broker", () => {
       assert.strictEqual(receivedChild.currentDepth, 1);
     });
   });
+
+  describe("MCP deny policy (G1)", () => {
+    let tempDir2: string;
+    let broker2: Broker;
+
+    beforeEach(() => {
+      tempDir2 = createTempDir();
+      broker2 = new Broker(tempDir2);
+    });
+
+    afterEach(() => {
+      cleanupTempDir(tempDir2);
+    });
+
+    test("getMCPDenyPolicy returns empty array when unset", () => {
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), []);
+    });
+
+    test("addMCPDenyPattern persists to config", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:shell:*"]);
+
+      // New broker on the same dir sees the change.
+      const broker3 = new Broker(tempDir2);
+      assert.deepStrictEqual(broker3.getMCPDenyPolicy(), ["mcp:shell:*"]);
+    });
+
+    test("addMCPDenyPattern is idempotent", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:shell:*"]);
+    });
+
+    test("addMCPDenyPattern preserves existing patterns", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      broker2.addMCPDenyPattern("mcp:net:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:shell:*", "mcp:net:*"]);
+    });
+
+    test("addMCPDenyPattern rejects empty pattern", () => {
+      assert.throws(() => broker2.addMCPDenyPattern(""), /must be non-empty/);
+    });
+
+    test("removeMCPDenyPattern returns true and removes when present", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      const removed = broker2.removeMCPDenyPattern("mcp:shell:*");
+      assert.strictEqual(removed, true);
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), []);
+    });
+
+    test("removeMCPDenyPattern returns false when absent", () => {
+      const removed = broker2.removeMCPDenyPattern("mcp:shell:*");
+      assert.strictEqual(removed, false);
+    });
+
+    test("removeMCPDenyPattern preserves other patterns", () => {
+      broker2.addMCPDenyPattern("mcp:shell:*");
+      broker2.addMCPDenyPattern("mcp:net:*");
+      broker2.removeMCPDenyPattern("mcp:shell:*");
+      assert.deepStrictEqual(broker2.getMCPDenyPolicy(), ["mcp:net:*"]);
+    });
+  });
 });
