@@ -102,7 +102,7 @@ export {
   MemoryAuditSink,
   NullAuditSink,
   getOrCreateMCPSigningKey,
-  publicKeyToJwk,
+  brokerPublicKeyToJwk,
   publicKeyToJwks,
   HttpSchemaPinRegistry,
   PinConflictError,

@@ -6,8 +6,10 @@
  */
 
 import {
+  MemoryAuditSink,
   MemorySchemaPinRegistry,
   type AgentToken,
+  type MCPAuditEvent,
   type MCPTool,
 } from "../../dist/index.js";
 import { dispatchToolCall, PermissionError, SchemaDriftError, type HarnessConfig } from "./harness.js";
@@ -44,17 +46,35 @@ const SHELL_EXEC: MCPTool = {
 
 const out: string[] = [];
 const log = (line: string) => out.push(line);
+const auditSink = new MemoryAuditSink();
 
 const baseConfig = (overrides: Partial<HarnessConfig> = {}): HarnessConfig => ({
   pinRegistry: new MemorySchemaPinRegistry(),
   invokeTool: async (server, tool) => `(would invoke ${server}/${tool})`,
   promptHuman: async () => true, // auto-approve in demo
   log,
+  auditSink,
+  agentId: "demo-agent",
   ...overrides,
 });
 
+function summarizeEvent(e: MCPAuditEvent): string {
+  switch (e.kind) {
+    case "mcp.tool.decision":
+      return `[audit] ${e.kind} ${e.server}/${e.tool} → ${e.decision}${e.matchedScope ? ` (matched ${e.matchedScope})` : ""}`;
+    case "mcp.schema.pin":
+      return `[audit] ${e.kind} ${e.server}/${e.tool}`;
+    case "mcp.schema.drift":
+    case "mcp.schema.repin":
+      return `[audit] ${e.kind} ${e.server}/${e.tool} ${e.priorHash?.slice(0, 8)} → ${e.hash?.slice(0, 8)}`;
+    default:
+      return `[audit] ${e.kind}`;
+  }
+}
+
 async function run(name: string, fn: () => Promise<void>) {
   out.length = 0;
+  auditSink.clear();
   console.log(`\n── ${name} ──`);
   try {
     await fn();
@@ -64,6 +84,7 @@ async function run(name: string, fn: () => Promise<void>) {
     else throw err;
   }
   for (const line of out) console.log(`  ${line}`);
+  for (const e of auditSink.events) console.log(`  ${summarizeEvent(e)}`);
 }
 
 async function main() {

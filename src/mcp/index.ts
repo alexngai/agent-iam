@@ -69,7 +69,7 @@ export type {
 
 export {
   getOrCreateMCPSigningKey,
-  publicKeyToJwk,
+  brokerPublicKeyToJwk,
   publicKeyToJwks,
 } from "./signing-key.js";
 export type { MCPSigningKey } from "./signing-key.js";

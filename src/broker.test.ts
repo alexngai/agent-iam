@@ -654,7 +654,19 @@ describe("Broker", () => {
       assert.strictEqual(jwks.keys.length, 1);
       assert.strictEqual(jwks.keys[0].alg, "EdDSA");
       assert.strictEqual(jwks.keys[0].use, "sig");
-      assert.match(jwks.keys[0].kid, /^[0-9a-f]{16}$/);
+      // RFC 7638 JWK thumbprint: base64url-encoded SHA-256 of canonical
+      // JWK members. 32 bytes → 43 chars without padding.
+      assert.match(jwks.keys[0].kid, /^[A-Za-z0-9_-]{43}$/);
+    });
+
+    test("kid is stable across PEM whitespace re-encoding (RFC 7638 thumbprint)", async () => {
+      const { publicKeyToJwks } = await import("./mcp/index.js");
+      const { publicKey } = broker3.getMCPSigningKey();
+      const lf = publicKey.replace(/\r\n/g, "\n");
+      const crlf = publicKey.replace(/\r?\n/g, "\r\n");
+      const a = await publicKeyToJwks(lf);
+      const b = await publicKeyToJwks(crlf);
+      assert.strictEqual(a.keys[0].kid, b.keys[0].kid);
     });
   });
 });

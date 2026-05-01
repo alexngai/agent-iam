@@ -16,7 +16,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
-import { exportJWK, importSPKI } from "jose";
+import { calculateJwkThumbprint, exportJWK, importSPKI } from "jose";
 
 const PRIVATE_KEY_FILE = "mcp-signing.key";
 const PUBLIC_KEY_FILE = "mcp-signing.pub";
@@ -72,11 +72,18 @@ export function getOrCreateMCPSigningKey(configDir: string): MCPSigningKey {
 }
 
 /**
- * Convert a PEM-encoded SPKI public key to a JWK (RFC 7517).
- * Adds `use: "sig"`, `alg: "EdDSA"`, and a deterministic `kid` derived
- * from the SHA-256 of the canonical key bytes.
+ * Convert a PEM-encoded SPKI public key to a JWK (RFC 7517) suitable for
+ * the broker's MCP signing JWKS. Adds `use: "sig"`, `alg: "EdDSA"`, and a
+ * deterministic `kid` computed via the RFC 7638 JWK thumbprint of the key
+ * material — not the PEM bytes — so trivial re-encoding (CRLF vs LF,
+ * extra whitespace) doesn't change the `kid`.
+ *
+ * Renamed from the original `publicKeyToJwk` to disambiguate from the
+ * identity stack's sync `publicKeyToJwk` in `src/identity/did-key.ts`,
+ * which returns a different shape (no `alg`/`use`/`kid`) for DID:key
+ * derivation purposes.
  */
-export async function publicKeyToJwk(publicKeyPem: string): Promise<{
+export async function brokerPublicKeyToJwk(publicKeyPem: string): Promise<{
   kty: string;
   alg: string;
   use: string;
@@ -86,12 +93,9 @@ export async function publicKeyToJwk(publicKeyPem: string): Promise<{
 }> {
   const key = await importSPKI(publicKeyPem, "EdDSA", { extractable: true });
   const jwk = (await exportJWK(key)) as { kty: string; crv?: string; x?: string };
-  // Deterministic kid: hash of the public key bytes (lowercase hex, first 16).
-  const kid = crypto
-    .createHash("sha256")
-    .update(publicKeyPem)
-    .digest("hex")
-    .slice(0, 16);
+  // RFC 7638 JWK thumbprint — canonical hash of the key's required JWK
+  // members. Stable across PEM re-encoding; collision-resistant.
+  const kid = await calculateJwkThumbprint(jwk, "sha256");
   return {
     ...jwk,
     alg: "EdDSA",
@@ -108,6 +112,6 @@ export async function publicKeyToJwk(publicKeyPem: string): Promise<{
 export async function publicKeyToJwks(publicKeyPem: string): Promise<{
   keys: Array<{ kty: string; alg: string; use: string; kid: string }>;
 }> {
-  const jwk = await publicKeyToJwk(publicKeyPem);
+  const jwk = await brokerPublicKeyToJwk(publicKeyPem);
   return { keys: [jwk] };
 }
