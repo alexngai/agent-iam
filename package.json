@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/**/*.test.js",
+    "test": "node --test dist/*.test.js dist/**/*.test.js",
     "cli": "node dist/cli.js",
     "prepublishOnly": "npm run build",
     "version:patch": "npm version patch && git push && git push --tags",
