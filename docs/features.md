@@ -57,12 +57,12 @@ org running many agents, the items below need filling in.
 | # | Gap | Severity for ops | Status |
 |---|---|---|---|
 | G1 | **Broker-config storage for `mcpDenyPolicy`** — currently an `CheckMCPCallOptions` field the harness must plumb. No CLI to manage; no propagation through distributed mode. | High | Closed (`c2a5e75` single-broker; distributed-mode propagation in this commit) |
-| G2 | **No fine-grained revocation** — only whole-token revocation exists. Can't withdraw a single MCP scope from a still-valid token. | Medium | Open |
+| G2 | **No fine-grained revocation** — only whole-token revocation exists. Can't withdraw a single MCP scope from a still-valid token. | Medium | Open — deferred until first incident where >5 tokens were revoked-and-reissued to remove one scope, or a user explicitly asks for scope-level withdrawal |
 | G3 | **No structured audit pipeline** — `formatDecision` produces a string for local logs only. No event schema, no pluggable sink, no broker-side aggregation. Critical for incident response. | High | Closed (`9b62607`) |
-| G4 | **Hook-based integrations don't get the full `MCPTool`** — Claude Code's `PreToolUse` and similar pass tool name + args, not the definition. So TOFU and annotation primitives can't run from a hook context. Library or harness must re-fetch the tool def. | Medium | Open |
+| G4 | **Hook-based integrations don't get the full `MCPTool`** — Claude Code's `PreToolUse` and similar pass tool name + args, not the definition. So TOFU and annotation primitives can't run from a hook context. Library or harness must re-fetch the tool def. | Medium | Open — deferred until first adopter wants agent-iam against a harness they can't modify (Claude Code, Cursor, Cline). Likely shape: a small `agent-iam-precheck` CLI helper that pulls the tool def from the live MCP server before checking |
 | G5 | **No JWKS endpoint / broker public key distribution** — `verifyMCPCredential` works in principle but the receiving server has no built-in way to fetch the broker's public key. Currently bring-your-own-distribution. | High | Closed (`af608b8`) — CLI-served JWKS; HTTP endpoint via LeaderServer deferred |
 | G6 | **No shared TOFU registry for ephemeral / containerized agents** — `FileSchemaPinRegistry` writes to disk (lost on container restart); `MemorySchemaPinRegistry` loses state every run. Many ephemeral agents need a shared registry to detect rug-pulls reliably. | High | Closed (client) (`4387d05`) — `HttpSchemaPinRegistry` ships against a documented HTTP contract; agent-iam doesn't ship the server (operator chooses Postgres/Redis/S3/etc.) |
-| G7 | **No async-approval contract for `ask` decisions** — the `Decision.kind === "ask"` branch returns a reason; the harness has to invent its own queue/UI. No standard `AsyncApprovalProvider` interface. | Medium | Open |
+| G7 | **No async-approval contract for `ask` decisions** — the `Decision.kind === "ask"` branch returns a reason; the harness has to invent its own queue/UI. No standard `AsyncApprovalProvider` interface. | Medium | Open — deferred until a second consumer needs a different `promptHuman` shape (e.g. Slack/email approver spanning minutes-to-hours rather than seconds). Generalize from two real cases, not one |
 | G8 | **No `Broker.issueForMCPServer()` integration** — `issueMCPCredential` is a pure function callers wire themselves. Means key management, audit, and CLI ergonomics are caller-side. | Medium | Closed (`af608b8`) |
 
 Filling order (post-W1 follow-ups, in priority):
@@ -79,6 +79,21 @@ Filling order (post-W1 follow-ups, in priority):
    approval contract. Useful but second-order; can wait for real demand.
 
 Track each gap as it lands by appending its closing commit hash to the row.
+
+### Why G2/G4/G7 stay open
+
+Each remaining open gap has a wide design space and no concrete forcing
+function yet. Building them now risks landing on the wrong abstraction —
+the kind of premature shape that calcifies and becomes hard to evolve
+when real signal arrives. Each row above carries an explicit trigger
+condition; when one fires, build that one feature against the actual
+need rather than pre-generalizing.
+
+The shipped W1 work all had a clear forcing function (specific attacks,
+specific adopter scenarios). The three remaining gaps don't, yet — and
+that's the right reason to defer rather than the wrong reason of "we
+forgot." Their presence in this table is the documentation that we made
+an explicit "wait for signal" decision.
 
 ### Motivation
 
