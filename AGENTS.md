@@ -1,18 +1,29 @@
 # Agent Instructions
 
-<!-- SWARMKIT-WIKI:START -->
-## SwarmKit Ecosystem Knowledge Base
+Agent IAM is a capability-based credential broker for AI agents: HMAC-signed
+tokens define scopes/constraints with hierarchical delegation (attenuation
+only — delegation can narrow but never widen permissions), plus a pluggable
+persistent identity system (Ed25519 keypair, platform, SPIFFE, or DID) kept
+separate from capability. Includes MCP tool-access control (schema-pin TOFU,
+allow/deny scopes, RFC 8707 audience-bound credentials) and a leader/follower
+distributed mode.
 
-This repository participates in the SwarmKit ecosystem. Before changing architecture, package boundaries, cross-repo integrations, protocols, task/dispatch behavior, memory/learning flows, workspace/git behavior, or agent orchestration semantics, query the shared knowledge base:
+## Build & Test
 
-```sh
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs context --cwd "$PWD"
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs repo agent-iam
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs interactions agent-iam
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs search "<concept>"
+```bash
+npm install
+npm run build   # compile TypeScript (tsc) — required before npm test
+npm test        # node:test against compiled dist/*.test.js
+npm run cli -- ...
 ```
 
-Canonical ecosystem memory lives at `/Users/alexngai/GitHub/swarmkit-wiki`.
+## Top Conventions
 
-When this repo changes knowledge that should persist across agents, update the relevant wiki article, semantic model, raw snapshot, graph artifact, or cross-repo interaction data in `swarmkit-wiki`. Do not treat this repo's local `.understand-anything/` cache as canonical; graph artifacts are centralized in `swarmkit-wiki/.understand-anything/graphs/`.
-<!-- SWARMKIT-WIKI:END -->
+- Main entry point for most operations is `Broker` (`src/broker.ts`).
+- Identity ("who you are") and scopes ("what you can do") are separate but
+  composable fields on `AgentToken` — don't conflate them.
+- Config/keys live under `~/.agent-credentials/` (override with
+  `AGENT_IAM_HOME`); private keys use mode `0o600`, dirs `0o700`.
+- Tokens pass between processes via the `AGENT_TOKEN` env var.
+
+See `CLAUDE.md` for the full guide.

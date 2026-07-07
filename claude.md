@@ -10,13 +10,16 @@ The codebase is organized into these layers:
 
 - **Core token system** (`src/token.ts`, `src/types.ts`): HMAC-SHA256 signed capability tokens with scopes, constraints, and hierarchical delegation
 - **Broker** (`src/broker.ts`): Orchestrates tokens, credentials, and identity. Main entry point for most operations
-- **Identity system** (`src/identity/`): Pluggable persistent identity with two providers:
+- **Identity system** (`src/identity/`): Pluggable persistent identity (`IdentityType` = `keypair` | `platform` | `attested` | `decentralized`), with providers:
   - `KeypairIdentityProvider`: Ed25519 keypairs, self-certifying, works without broker for verification
   - `PlatformIdentityProvider`: Broker-assigned UUIDs with HMAC, requires broker for verification
-  - `IdentityService`: Dispatches to correct provider based on ID prefix (`key:` vs `platform:`)
+  - `SpiffeIdentityProvider`: SPIFFE/SPIFFE-ID-based attested identity
+  - `DidWebIdentityProvider`: `did:web` decentralized identity
+  - `IdentityService`: Dispatches to the correct provider via `inferType()` based on ID prefix (e.g. `key:`, `platform:`)
   - `standalone-verifier.ts`: Pure crypto verification function - no broker, no disk I/O, no network
 - **Runtime** (`src/runtime.ts`): Agent-side token lifecycle management, refresh, subprocess spawning
 - **Providers** (`src/providers/`): GitHub, Google, AWS, Slack, API key credential adapters
+- **MCP access control** (`src/mcp/`): Schema-pin TOFU (rug-pull defense), allow/deny scope checks, RFC 8707 audience-bound credentials, audit sink. See `docs/mcp-policy.md`
 - **Distributed** (`src/distributed/`): Leader/follower sync, key rotation, revocation lists
 - **CLI** (`src/cli.ts`): Command-line interface for all operations
 
@@ -39,11 +42,11 @@ The codebase is organized into these layers:
 ```bash
 npm install          # Install dependencies
 npm run build        # TypeScript compilation (tsc)
-npm test             # Run all tests (318 tests, node:test)
+npm test             # Run all tests (node:test, against compiled dist/*.test.js)
 npm run cli -- ...   # Run CLI commands
 ```
 
-Tests use `node:test` and `node:assert`. Test files are co-located with source (`*.test.ts`). Identity tests are in `src/identity/identity.test.ts`.
+`npm test` runs against **compiled output**, not source — run `npm run build` first (or after source changes) or the tests will run stale code. Tests use `node:test` and `node:assert`. Test files are co-located with source (`*.test.ts`). Identity tests are in `src/identity/identity.test.ts`.
 
 ## Common Patterns
 
@@ -68,20 +71,3 @@ Tests use `node:test` and `node:assert`. Test files are co-located with source (
 - Identity keys stored in `~/.agent-credentials/identities/`
 - Private keys use mode 0o600, directories use mode 0o700
 - Tokens passed between processes via `AGENT_TOKEN` environment variable
-
-<!-- SWARMKIT-WIKI:START -->
-## SwarmKit Ecosystem Knowledge Base
-
-This repository participates in the SwarmKit ecosystem. Before changing architecture, package boundaries, cross-repo integrations, protocols, task/dispatch behavior, memory/learning flows, workspace/git behavior, or agent orchestration semantics, query the shared knowledge base:
-
-```sh
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs context --cwd "$PWD"
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs repo agent-iam
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs interactions agent-iam
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs search "<concept>"
-```
-
-Canonical ecosystem memory lives at `/Users/alexngai/GitHub/swarmkit-wiki`.
-
-When this repo changes knowledge that should persist across agents, update the relevant wiki article, semantic model, raw snapshot, graph artifact, or cross-repo interaction data in `swarmkit-wiki`. Do not treat this repo's local `.understand-anything/` cache as canonical; graph artifacts are centralized in `swarmkit-wiki/.understand-anything/graphs/`.
-<!-- SWARMKIT-WIKI:END -->
